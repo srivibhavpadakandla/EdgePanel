@@ -202,15 +202,20 @@ final class EdgePanelState: ObservableObject {
         try? p.run()
     }
 
-    /// "Take me there": resume a chat in Terminal (`claude --resume <id>` in its cwd).
+    /// "Take me there": open the chat's project in VS Code (or Cursor) — where
+    /// the Claude Code extension lives — rather than a separate Terminal.
     func openChat(cwd: String?, id: String) {
         guard let cwd, !cwd.isEmpty else { return }
-        let safeCwd = cwd.replacingOccurrences(of: "'", with: "'\\''")
-        let cmd = "cd '\(safeCwd)' && claude --resume \(id)"
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(cmd)\"\nend tell"
+        let editors = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+                       "com.vscodium.codium", "com.todesktop.230313mzl4w4u92" /* Cursor */]
+        let ws = NSWorkspace.shared
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", script]
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        if let bid = editors.first(where: { ws.urlForApplication(withBundleIdentifier: $0) != nil }) {
+            p.arguments = ["-b", bid, cwd]
+        } else {
+            p.arguments = [cwd]   // fall back to Finder
+        }
         try? p.run()
     }
 

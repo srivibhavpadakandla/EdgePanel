@@ -92,6 +92,8 @@ final class EdgeClient: ObservableObject {
             guard code == 200 else { throw URLError(.badServerResponse) }
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
             snapshot = snap; connected = true; lastError = nil
+            ActivityManager.shared.sync(working: snap.working)
+            ActivityManager.shared.checkUsage(plan: snap.plan)
         } catch {
             connected = false
             lastError = (error as? URLError)?.code == .cannotConnectToHost

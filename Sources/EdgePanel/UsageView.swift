@@ -200,7 +200,7 @@ struct RecentChatsCard: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("Resume “\(c.name(summaries: summaries))” in Terminal")
+                    .help("Open “\(c.name(summaries: summaries))” in VS Code")
                 }
             }
         }

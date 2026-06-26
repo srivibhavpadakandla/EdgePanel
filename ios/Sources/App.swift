@@ -22,6 +22,7 @@ struct RootView: View {
         .safeAreaInset(edge: .top) { header }
         .sheet(isPresented: $showPair) { PairSheet().environmentObject(client) }
         .onAppear {
+            ActivityManager.shared.requestNotifications()
             if client.token.isEmpty { showPair = true } else { client.start() }
         }
     }
