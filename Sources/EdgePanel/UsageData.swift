@@ -455,8 +455,11 @@ extension UsageLoader {
             if boundary >= 0, let ts = objs[boundary]["timestamp"] as? String { promptAt = parseDate(ts) }
 
             // Tokens this turn: dedup assistant calls by request id (keep the final
-            // non-streaming one), sum billable (input + output + cache writes).
-            var byReq: [String: (inT: Int, outT: Int, cacheW: Int)] = [:]
+            // non-streaming one), then sum the NON-cached tokens — fresh input +
+            // output. Cache reads/writes are excluded: on the first call of a turn
+            // cache_creation can be the entire (re-cached) context, which would
+            // swamp the real number with hundreds of K of non-work tokens.
+            var byReq: [String: (inT: Int, outT: Int)] = [:]
             var anon = 0
             if boundary >= 0 {
                 for o in objs[(boundary + 1)...] {
@@ -464,13 +467,12 @@ extension UsageLoader {
                           let m = o["message"] as? [String: Any],
                           let usage = m["usage"] as? [String: Any] else { continue }
                     let inT = intVal(usage["input_tokens"]), outT = intVal(usage["output_tokens"])
-                    let cacheW = intVal(usage["cache_creation_input_tokens"])
                     let rid = (o["requestId"] as? String) ?? (m["id"] as? String) ?? { anon += 1; return "a\(anon)" }()
                     if let e = byReq[rid], e.outT >= outT { continue }
-                    byReq[rid] = (inT, outT, cacheW)
+                    byReq[rid] = (inT, outT)
                 }
             }
-            let turnTokens = byReq.values.reduce(0) { $0 + $1.inT + $1.outT + $1.cacheW }
+            let turnTokens = byReq.values.reduce(0) { $0 + $1.inT + $1.outT }
 
             // The turn is finished when a completed assistant message (stop_reason
             // end_turn / stop_sequence / max_tokens) exists AFTER your last prompt.
