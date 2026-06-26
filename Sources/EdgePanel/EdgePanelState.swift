@@ -230,30 +230,41 @@ final class EdgePanelState: ObservableObject {
         }
     }
 
-    /// Tier 2: alert the phone that a permission is waiting — so you can Allow/Deny
-    /// from the Lock Screen even with the app closed. No-op unless APNs is configured.
+    /// Alert the phone that a permission is waiting — so you can Allow/Deny even with
+    /// the app fully closed. Two independent paths: APNs (Tier 2, paid) and ntfy
+    /// (free, with Allow/Deny action buttons). No-op if neither is configured.
     private func pushPermissionAlert(_ p: PendingPermission) {
-        guard APNsPusher.shared.enabled, let dt = devicePushToken else { return }
-        APNsPusher.shared.pushPermission(
-            deviceToken: dt, id: p.id,
-            title: "\(p.toolName) needs approval",
-            body: p.summary.isEmpty ? p.reason : p.summary)
+        let body = p.summary.isEmpty ? p.reason : p.summary
+        if APNsPusher.shared.enabled, let dt = devicePushToken {
+            APNsPusher.shared.pushPermission(deviceToken: dt, id: p.id,
+                title: "\(p.toolName) needs approval", body: body)
+        }
+        NtfyPusher.shared.pushPermission(id: p.id, tool: p.toolName, summary: body, risk: p.risk.rawValue)
     }
 
     /// Push an "end" Live Activity update + alert when a session finishes — so the
     /// phone updates even if the app is closed. No-op unless APNs is configured.
     func pushSessionEnded(_ s: LiveSession) {
-        guard APNsPusher.shared.enabled else { return }
-        let detail = "\(fmtTokens(s.turnTokens)) tokens"
-        if let tok = activityPushTokens[s.id] {
-            let state: [String: Any] = ["project": s.project, "prompt": s.promptText ?? "",
-                                        "startEpoch": s.promptAt?.timeIntervalSince1970 ?? 0,
-                                        "tokens": s.turnTokens, "done": true, "doneDetail": detail]
-            APNsPusher.shared.pushActivity(token: tok, event: "end", contentState: state)
-            activityPushTokens[s.id] = nil
+        let elapsed = s.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
+        let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
+        let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
+        let detail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
+        if APNsPusher.shared.enabled {
+            if let tok = activityPushTokens[s.id] {
+                let state: [String: Any] = ["project": s.project, "prompt": s.promptText ?? "",
+                                            "startEpoch": s.promptAt?.timeIntervalSince1970 ?? 0,
+                                            "tokens": s.turnTokens, "done": true, "doneDetail": detail]
+                APNsPusher.shared.pushActivity(token: tok, event: "end", contentState: state)
+                activityPushTokens[s.id] = nil
+            }
+            if let dt = devicePushToken {
+                APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
+            }
         }
-        if let dt = devicePushToken {
-            APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
+        // Free fully-closed path — skip sub-15s blips so it only pings for turns
+        // you'd actually wait on.
+        if elapsed >= 15 {
+            NtfyPusher.shared.pushDone(title: "✓ \(s.project) finished", detail: detail)
         }
     }
 

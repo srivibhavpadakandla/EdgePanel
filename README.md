@@ -126,6 +126,31 @@ to a ✓ done state and posts a local notification when the turn ends, and warns
 80% / 90% of your 5-hour limit. Done/usage delivery happens while the app is
 running (foreground or recently backgrounded); the timer ticks regardless.
 
+### Free closed-app push via ntfy (no paid account)
+
+iOS only delivers to a *fully-closed* app through APNs, which needs a paid Apple
+account. The free workaround: piggyback on [ntfy](https://ntfy.sh), whose own app
+already has push. The Mac (always running) POSTs to an ntfy topic when a prompt
+finishes or a permission is waiting — and the permission alert carries **Allow /
+Deny / Always** action buttons that POST the decision straight back to the Mac.
+Works locked + fully-closed, instant, $0.
+
+1. Install the **ntfy** app on your phone, subscribe to a private topic name.
+2. On the Mac, create `~/.edgepanel/ntfy.json`:
+
+   ```json
+   {
+     "server": "https://ntfy.sh",
+     "topic": "edgepanel-<something-unguessable>",
+     "macHost": "100.x.x.x:8788",
+     "token": "<your EdgePanel pairing token>"
+   }
+   ```
+
+   `macHost` + `token` let the buttons reach the Mac (use the Tailscale IP so it
+   works off your LAN). The topic name is the only access control on the public
+   server — keep it unguessable or self-host ntfy. Absent the file, ntfy is off.
+
 ### Tier 2 — push when the app is closed (optional, needs a paid account)
 
 For the done/permission/usage alerts to arrive when the app is fully closed or
