@@ -26,6 +26,7 @@ struct EdgeSnapshot: Codable {
     struct Working: Codable, Identifiable {
         var id: String
         var project: String
+        var cwd: String = ""
         var model: String?
         var prompt: String?
         var promptSummary: String?
@@ -144,6 +145,22 @@ final class EdgeClient: ObservableObject {
         guard let (data, _) = try? await URLSession.shared.data(for: req),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return obj["jobId"] as? String
+    }
+
+    /// Load a session's real conversation history from the Mac transcript.
+    func fetchHistory(sessionId: String, cwd: String) async -> [(role: String, text: String)] {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/history") else { return [] }
+        var req = URLRequest(url: url, timeoutInterval: 12)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": sessionId, "cwd": cwd])
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["messages"] as? [[String: String]] else { return [] }
+        return arr.compactMap { m in
+            guard let r = m["role"], let t = m["text"] else { return nil }
+            return (r, t)
+        }
     }
 
     /// Poll a chat job until it's done/error.

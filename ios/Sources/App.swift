@@ -100,11 +100,14 @@ struct UsageTab: View {
     @EnvironmentObject var client: EdgeClient
     @Binding var showPair: Bool
     var body: some View {
-        ZStack {
-            T.bg.ignoresSafeArea()
-            ScrollView { Dashboard().padding(16) }
+        NavigationStack {
+            ZStack {
+                T.bg.ignoresSafeArea()
+                ScrollView { Dashboard().padding(16) }
+            }
+            .safeAreaInset(edge: .top) { header }
+            .toolbar(.hidden, for: .navigationBar)
         }
-        .safeAreaInset(edge: .top) { header }
     }
     private var header: some View {
         HStack(spacing: 10) {
@@ -330,7 +333,11 @@ struct WorkingCard: View {
                     Text("nothing running — waiting on your next prompt")
                         .font(.claude(12)).foregroundColor(T.subtext)
                 } else {
-                    ForEach(working) { w in WorkingRow(w: w) }
+                    ForEach(working) { w in
+                        NavigationLink {
+                            ChatThreadView(sessionId: w.id, project: w.project, cwd: w.cwd)
+                        } label: { WorkingRow(w: w) }.buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -351,6 +358,7 @@ struct WorkingRow: View {
                 } else {
                     Text("—").foregroundColor(T.green)
                 }
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundColor(T.subtext)
             }
             (Text("PROMPT  ").font(.claude(10, .semibold)).foregroundColor(T.subtext)
                 + Text("\u{201C}\(w.display)\u{201D}").font(.claude(14)).italic().foregroundColor(T.text.opacity(0.9)))

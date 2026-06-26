@@ -427,6 +427,7 @@ struct ToolEvent: Identifiable, Equatable {
 struct LiveSession: Identifiable {
     let id: String            // session uuid (transcript filename)
     let project: String       // cwd basename
+    var cwd: String = ""      // full working dir (to resume the session from the phone)
     let model: String?
     let promptAt: Date?       // when the current turn's user prompt was submitted
     let promptText: String?   // the user's prompt that started this turn
@@ -511,18 +512,20 @@ extension UsageLoader {
             let turnComplete = boundary < 0 || lastTerminalAssistant > boundary
 
             var project = "session"
+            var cwdFull = ""
             var model: String?
             for o in objs.reversed() {
-                if project == "session", let cwd = o["cwd"] as? String, !cwd.isEmpty {
+                if cwdFull.isEmpty, let cwd = o["cwd"] as? String, !cwd.isEmpty {
+                    cwdFull = cwd
                     project = (cwd as NSString).lastPathComponent
                 }
                 if model == nil, (o["type"] as? String) == "assistant",
                    let mm = (o["message"] as? [String: Any])?["model"] as? String { model = mm }
-                if project != "session" && model != nil { break }
+                if !cwdFull.isEmpty && model != nil { break }
             }
 
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
-                                   model: model, promptAt: promptAt, promptText: promptText,
+                                   cwd: cwdFull, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete))
         }
         return out
@@ -665,6 +668,41 @@ extension UsageLoader {
         if let d = a as? Double { return Int(d) }
         if let n = a as? NSNumber { return n.intValue }
         return 0
+    }
+
+    /// The recent conversation of a session (your prompts + Claude's text replies),
+    /// oldest→newest, for showing the real chat thread on the phone. Tail-reads so
+    /// it's cheap even on a huge transcript (older messages beyond the tail drop off).
+    static func sessionMessages(sessionId: String, cwd: String = "", limit: Int = 40) -> [(role: String, text: String)] {
+        let base = projectsBase()
+        var url: URL?
+        if !cwd.isEmpty {   // fast path: Claude Code encodes the cwd as the project dir name
+            let encoded = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            let candidate = base.appendingPathComponent(encoded).appendingPathComponent("\(sessionId).jsonl")
+            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+        }
+        if url == nil, let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: nil) {
+            while let u = en.nextObject() as? URL {
+                if u.lastPathComponent == "\(sessionId).jsonl" { url = u; break }
+            }
+        }
+        guard let url, let text = tailString(url, maxBytes: 4_000_000) else { return [] }
+        var out: [(role: String, text: String)] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else { continue }
+            switch o["type"] as? String {
+            case "user":
+                if let t = userPromptText(o) { out.append(("user", t)) }
+            case "assistant":
+                if let blocks = (o["message"] as? [String: Any])?["content"] as? [[String: Any]] {
+                    let txt = blocks.compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+                        .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !txt.isEmpty { out.append(("assistant", txt)) }
+                }
+            default: break
+            }
+        }
+        return Array(out.suffix(limit))
     }
 
     /// The last `maxBytes` of a file as text, dropping the partial first line.

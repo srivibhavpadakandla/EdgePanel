@@ -186,6 +186,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
                                     body: Data("{\"jobId\":\"\(jid)\"}".utf8))
             }
+            // Load a session's real conversation (your prompts + Claude's replies),
+            // so the phone shows the actual chat history from your Mac. Body:{sessionId,cwd?}.
+            if request.method == "POST", path == "/chat/history" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let sid = obj["sessionId"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let cwd = obj["cwd"] as? String ?? ""
+                let msgs = UsageLoader.sessionMessages(sessionId: sid, cwd: cwd)
+                let arr = msgs.map { ["role": $0.role, "text": $0.text] }
+                let data = (try? JSONSerialization.data(withJSONObject: ["messages": arr])) ?? Data("{\"messages\":[]}".utf8)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            }
             if request.method == "POST", path == "/chat/poll" {
                 guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
                       let jid = obj["jobId"] as? String else {

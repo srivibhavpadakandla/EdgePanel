@@ -28,6 +28,7 @@ struct EdgeSnapshot: Codable {
     struct Working: Codable {
         var id: String
         var project: String
+        var cwd: String
         var model: String?
         var prompt: String?
         var promptSummary: String?
@@ -88,7 +89,7 @@ struct EdgeSnapshot: Codable {
         }()
 
         let working = store.sessions.filter { $0.isWorking() }.map { sn in
-            Working(id: sn.id, project: sn.project, model: sn.model.map(prettyModel),
+            Working(id: sn.id, project: sn.project, cwd: sn.cwd, model: sn.model.map(prettyModel),
                     prompt: sn.promptText, promptSummary: store.promptSummaries[sn.id],
                     promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens)
         }
