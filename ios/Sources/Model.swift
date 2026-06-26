@@ -9,6 +9,7 @@ struct EdgeSnapshot: Codable {
     var working: [Working]
     var chats: [Chat]
     var calendar: [CalDay]
+    var pending: Pending?
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -45,6 +46,16 @@ struct EdgeSnapshot: Codable {
         var day: Int; var tokens: Int
         var id: Int { day }
     }
+    struct Pending: Codable, Identifiable {
+        var id: String
+        var tool: String
+        var summary: String
+        var reason: String
+        var risk: String          // "read" | "write" | "danger"
+        var project: String?
+        var preview: [String]
+        var allowRule: String
+    }
 }
 
 @MainActor
@@ -65,11 +76,23 @@ final class EdgeClient: ObservableObject {
         }
         Task { await poll() }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { await self?.poll() }
         }
     }
     func stop() { timer?.invalidate(); timer = nil }
+
+    /// Approve / deny / always a held permission request on the Mac, then poll
+    /// immediately so the card clears without waiting for the next tick.
+    func decidePermission(id: String, decision: String) {
+        guard !host.isEmpty, !token.isEmpty,
+              let url = URL(string: "http://\(host)/permission/decide") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "decision": decision])
+        Task { _ = try? await URLSession.shared.data(for: req); await poll() }
+    }
 
     /// Forward an APNs token to the Mac (Tier 2).
     func postPushToken(kind: String, sessionId: String?, pushToken: String) {
@@ -110,6 +133,7 @@ final class EdgeClient: ObservableObject {
             snapshot = snap; connected = true; lastError = nil
             ActivityManager.shared.sync(working: snap.working)
             ActivityManager.shared.checkUsage(plan: snap.plan)
+            ActivityManager.shared.syncPermission(snap.pending)
         } catch {
             connected = false
             lastError = (error as? URLError)?.code == .cannotConnectToHost

@@ -12,13 +12,38 @@ struct EdgePanelMobileApp: App {
     }
 }
 
-/// Forwards the APNs device token to the Mac (Tier 2 alerts). Needs the push
-/// entitlement + a paid Apple Developer account to actually receive a token.
-final class PushDelegate: NSObject, UIApplicationDelegate {
+/// Forwards the APNs device token to the Mac (Tier 2 alerts) and handles the
+/// Allow/Deny buttons on permission notifications.
+final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
         Task { @MainActor in EdgeClient.shared.postPushToken(kind: "device", sessionId: nil, pushToken: hex) }
+    }
+
+    // Show permission/done banners even when the app is in the foreground.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    // Allow / Deny tapped on a permission notification → resolve it on the Mac.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let id = response.notification.request.content.userInfo["permId"] as? String {
+            let decision = response.actionIdentifier == "ALLOW" ? "allow"
+                         : response.actionIdentifier == "DENY"  ? "deny"  : ""
+            if !decision.isEmpty {
+                Task { @MainActor in EdgeClient.shared.decidePermission(id: id, decision: decision) }
+            }
+        }
+        completionHandler()
     }
 }
 
@@ -56,6 +81,7 @@ struct Dashboard: View {
     var body: some View {
         VStack(spacing: 14) {
             if let s = client.snapshot {
+                if let pend = s.pending { PermissionCard(p: pend) }
                 if let p = s.plan { PlanCard(plan: p) }
                 WorkingCard(working: s.working)
                 CalendarCard(days: s.calendar)
@@ -104,6 +130,69 @@ struct PlanCard: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: 16).fill(T.accentSoft))
+    }
+}
+
+struct PermissionCard: View {
+    @EnvironmentObject var client: EdgeClient
+    let p: EdgeSnapshot.Pending
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 9) {
+                    Image(systemName: "lock.shield.fill").foregroundColor(riskColor)
+                    Text("Permission needed").font(.claude(15, .semibold)).foregroundColor(T.text)
+                    Spacer()
+                    Text(p.risk.uppercased()).font(.claude(10, .semibold)).foregroundColor(riskColor)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(riskColor.opacity(0.16)))
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(p.tool + (p.project.map { " · \($0)" } ?? ""))
+                        .font(.claude(13, .semibold)).foregroundColor(T.text)
+                    if !p.summary.isEmpty {
+                        Text(p.summary).font(.claude(13)).foregroundColor(T.text.opacity(0.9)).lineLimit(3)
+                    }
+                    if !p.reason.isEmpty {
+                        Text(p.reason).font(.claude(11)).foregroundColor(T.subtext).lineLimit(2)
+                    }
+                }
+                if !p.preview.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(p.preview.prefix(5).enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(T.subtext).lineLimit(1)
+                        }
+                    }
+                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(T.track.opacity(0.5)))
+                }
+                HStack(spacing: 10) {
+                    Button { client.decidePermission(id: p.id, decision: "deny") } label: {
+                        Text("Deny").font(.claude(14, .semibold)).foregroundColor(T.red)
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(T.red.opacity(0.14)))
+                    }.buttonStyle(.plain)
+                    Button { client.decidePermission(id: p.id, decision: "allow") } label: {
+                        Text("Allow").font(.claude(14, .semibold)).foregroundColor(.black)
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(T.green))
+                    }.buttonStyle(.plain)
+                }
+                Button { client.decidePermission(id: p.id, decision: "always") } label: {
+                    Text("Always allow this").font(.claude(12, .medium)).foregroundColor(T.accent2)
+                        .frame(maxWidth: .infinity)
+                }.buttonStyle(.plain)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 16).strokeBorder(riskColor.opacity(0.55), lineWidth: 1.2))
+    }
+    private var riskColor: Color {
+        switch p.risk.lowercased() {
+        case "danger": return T.red
+        case "write":  return T.accent
+        default:        return T.accent2
+        }
     }
 }
 

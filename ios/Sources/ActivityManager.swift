@@ -15,13 +15,37 @@ final class ActivityManager {
     private var last: [String: EdgeSnapshot.Working] = [:]   // last-seen working set (for done detail)
     private var lastPlanPct: Double = 0
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
+    private var lastPermId: String?        // permission request already surfaced
 
     /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
     var onPushToken: ((String, String?, String) -> Void)?
 
     func requestNotifications() {
-        // Local notifications only (no remote push → no paid-account entitlement).
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        // Allow / Deny buttons right on the permission notification.
+        let allow = UNNotificationAction(identifier: "ALLOW", title: "Allow", options: [.authenticationRequired])
+        let deny  = UNNotificationAction(identifier: "DENY",  title: "Deny",  options: [.destructive, .authenticationRequired])
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: "PERMISSION", actions: [allow, deny],
+                                   intentIdentifiers: [], options: [])
+        ])
+    }
+
+    /// Surface a NEW permission request as an actionable local notification (works
+    /// while the app is foreground / recently backgrounded; APNs covers fully-closed).
+    func syncPermission(_ pending: EdgeSnapshot.Pending?) {
+        guard let p = pending else { lastPermId = nil; return }
+        guard p.id != lastPermId else { return }
+        lastPermId = p.id
+        let c = UNMutableNotificationContent()
+        c.title = "\(p.tool) needs approval"
+        c.body = p.summary.isEmpty ? p.reason : p.summary
+        c.sound = .default
+        c.categoryIdentifier = "PERMISSION"
+        c.userInfo = ["permId": p.id]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "perm-\(p.id)", content: c, trigger: nil))
     }
 
     /// Reconcile the aggregate Live Activity with the current working sessions.

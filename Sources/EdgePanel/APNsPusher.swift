@@ -57,6 +57,17 @@ final class APNsPusher: @unchecked Sendable {
         send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
     }
 
+    /// Push an actionable "permission needed" alert (category PERMISSION → Allow/Deny
+    /// buttons on the Lock Screen). Carries the request id so the tap resolves it.
+    func pushPermission(deviceToken: String, id: String, title: String, body: String) {
+        guard let config else { return }
+        let payload: [String: Any] = [
+            "aps": ["alert": ["title": title, "body": body], "sound": "default",
+                    "category": "PERMISSION", "mutable-content": 1],
+            "permId": id]
+        send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
+    }
+
     private func send(token: String, payload: [String: Any], topic: String, pushType: String) {
         guard let url = URL(string: "https://api.push.apple.com/3/device/\(token)"),
               let body = try? JSONSerialization.data(withJSONObject: payload) else { return }

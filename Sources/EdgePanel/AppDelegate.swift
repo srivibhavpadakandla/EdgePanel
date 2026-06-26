@@ -136,6 +136,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { state.setPushToken(kind: kind, sessionId: sid, token: tok) }
                 return .ok("ok")
             }
+            // Approve/deny a held permission request from the phone. Body: {id, decision}.
+            if request.method == "POST", path == "/permission/decide" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let id = obj["id"] as? String, let decision = obj["decision"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                await MainActor.run { state.resolveRemote(id: id, decision: decision) }
+                return .ok("ok")
+            }
             return .notFound()
         }
         do {

@@ -48,7 +48,7 @@ final class EdgePanelState: ObservableObject {
     private var resolvers: [String: CheckedContinuation<PermissionVerdict, Never>] = [:]
     private var blockingCounter = 0
     private let decisionTimeout: TimeInterval =
-        TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 20
+        TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 30
 
     private var idleTimer: Timer?
 
@@ -142,6 +142,7 @@ final class EdgePanelState: ObservableObject {
             resolvers[bid] = continuation
             pending = request
             onApprovalChange?(true)           // lock open + auto-reveal
+            pushPermissionAlert(request)      // Tier 2: ping the phone (no-op unless APNs configured)
             idleTimer?.invalidate(); idleTimer = nil
             Task { [weak self, decisionTimeout, bid] in
                 try? await Task.sleep(nanoseconds: UInt64(decisionTimeout * 1_000_000_000))
@@ -153,6 +154,20 @@ final class EdgePanelState: ObservableObject {
     func resolveCurrent(_ verdict: PermissionVerdict) {
         guard let bid = pending?.id else { return }
         resolve(bid, verdict)
+    }
+
+    /// Resolve a held permission from the phone. decision ∈ allow | deny | always.
+    /// "always" also writes the allow-rule into Claude Code's allowlist.
+    func resolveRemote(id: String, decision: String) {
+        switch decision.lowercased() {
+        case "always":
+            if let p = pending, p.id == id { AllowlistWriter.add(rule: p.allowRule) }
+            resolve(id, .allow)
+        case "deny":
+            resolve(id, .deny)
+        default:
+            resolve(id, .allow)
+        }
     }
 
     /// Allow + write a rule into Claude Code's allowlist so it never re-asks.
@@ -213,6 +228,16 @@ final class EdgePanelState: ObservableObject {
         case "device":   devicePushToken = token
         default:         break
         }
+    }
+
+    /// Tier 2: alert the phone that a permission is waiting — so you can Allow/Deny
+    /// from the Lock Screen even with the app closed. No-op unless APNs is configured.
+    private func pushPermissionAlert(_ p: PendingPermission) {
+        guard APNsPusher.shared.enabled, let dt = devicePushToken else { return }
+        APNsPusher.shared.pushPermission(
+            deviceToken: dt, id: p.id,
+            title: "\(p.toolName) needs approval",
+            body: p.summary.isEmpty ? p.reason : p.summary)
     }
 
     /// Push an "end" Live Activity update + alert when a session finishes — so the

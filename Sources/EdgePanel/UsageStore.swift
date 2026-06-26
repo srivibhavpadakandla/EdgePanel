@@ -31,6 +31,9 @@ final class UsageStore: ObservableObject {
     @Published var recentChats: [RecentChat] = []
     // sessionID → short summary of its (long) prompt, from the claude CLI.
     @Published var promptSummaries: [String: String] = [:]
+    // sessionID → the exact prompt text its cached summary was made for, so a NEW
+    // prompt in the same session drops the stale label instead of showing it.
+    private var summarizedPrompt: [String: String] = [:]
 
     private let q = DispatchQueue(label: "edgepanel.load", qos: .userInitiated)
     private let planQ = DispatchQueue(label: "edgepanel.plan", qos: .userInitiated)
@@ -106,11 +109,25 @@ final class UsageStore: ObservableObject {
     }
 
     /// Summarize long prompts (via the claude CLI) for the WORKING NOW rows.
+    /// Keeps `promptSummaries[id]` in lock-step with the session's CURRENT prompt:
+    /// a short or changed prompt drops the stale summary (the row falls back to the
+    /// raw text) instead of showing a label from a prompt you sent a while back.
     private func updateSummaries(_ sessions: [LiveSession]) {
+        let liveIDs = Set(sessions.map { $0.id })
+        promptSummaries = promptSummaries.filter { liveIDs.contains($0.key) }
+        summarizedPrompt = summarizedPrompt.filter { liveIDs.contains($0.key) }
         for s in sessions {
-            guard let pt = s.promptText, pt.count > PromptSummarizer.threshold else { continue }
+            // No prompt, or short enough to show verbatim → clear any stale summary.
+            guard let pt = s.promptText, pt.count > PromptSummarizer.threshold else {
+                promptSummaries[s.id] = nil; summarizedPrompt[s.id] = nil; continue
+            }
+            // Prompt changed since we last summarized this session → drop the stale
+            // label now; the new one swaps in via onReady when it's ready.
+            if summarizedPrompt[s.id] != pt { promptSummaries[s.id] = nil }
+            summarizedPrompt[s.id] = pt
             if let cached = PromptSummarizer.shared.shortLabel(for: pt, onReady: { [weak self] summary in
-                self?.promptSummaries[s.id] = summary
+                guard let self, self.summarizedPrompt[s.id] == pt else { return }  // a superseded prompt's late summary — ignore
+                self.promptSummaries[s.id] = summary
             }) {
                 promptSummaries[s.id] = cached
             }

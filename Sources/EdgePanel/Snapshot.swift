@@ -11,6 +11,7 @@ struct EdgeSnapshot: Codable {
     var working: [Working]
     var chats: [Chat]
     var calendar: [CalDay]
+    var pending: Pending?      // a permission request waiting on you (approve from the phone)
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -40,6 +41,16 @@ struct EdgeSnapshot: Codable {
         var lastActiveEpoch: Double
     }
     struct CalDay: Codable { var day: Int; var tokens: Int }
+    struct Pending: Codable {
+        var id: String
+        var tool: String
+        var summary: String
+        var reason: String
+        var risk: String          // "read" | "write" | "danger"
+        var project: String?
+        var preview: [String]     // a few command / diff lines for context
+        var allowRule: String
+    }
 
     @MainActor
     static func build(store: UsageStore, state: EdgePanelState) -> EdgeSnapshot {
@@ -74,8 +85,14 @@ struct EdgeSnapshot: Codable {
         }
         let calendar = s.monthDayTokens.map { CalDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
 
+        let pending = state.pending.map { p in
+            Pending(id: p.id, tool: p.toolName, summary: p.summary, reason: p.reason,
+                    risk: p.risk.rawValue, project: p.project,
+                    preview: p.preview.prefix(6).map { $0.text }, allowRule: p.allowRule)
+        }
+
         return EdgeSnapshot(generatedAt: now.timeIntervalSince1970, plan: plan,
                             spend: Spend(fiveHourUSD: windowSpend),
-                            working: working, chats: chats, calendar: calendar)
+                            working: working, chats: chats, calendar: calendar, pending: pending)
     }
 }
