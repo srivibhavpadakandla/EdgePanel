@@ -106,6 +106,33 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
+    struct ChatJob: Codable { var status: String; var result: String?; var sessionId: String?; var error: String? }
+
+    /// Send a message to Claude Code on the Mac; returns a jobId to poll.
+    func sendChat(cwd: String, sessionId: String?, message: String) async -> String? {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        var body: [String: Any] = ["message": message, "cwd": cwd]
+        if let sessionId { body["sessionId"] = sessionId }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj["jobId"] as? String
+    }
+
+    /// Poll a chat job until it's done/error.
+    func pollChat(_ jobId: String) async -> ChatJob? {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/poll") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["jobId": jobId])
+        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
+        return try? JSONDecoder().decode(ChatJob.self, from: data)
+    }
+
     /// Ask the Mac to resume this chat (opens it in VS Code on the Mac).
     func openChat(_ chat: EdgeSnapshot.Chat) {
         guard let url = URL(string: "http://\(host)/open") else { return }

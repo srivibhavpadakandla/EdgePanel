@@ -76,11 +76,13 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPair = false
     var body: some View {
-        ZStack {
-            T.bg.ignoresSafeArea()
-            ScrollView { Dashboard().padding(16) }
+        TabView {
+            UsageTab(showPair: $showPair)
+                .tabItem { Label("Usage", systemImage: "gauge.with.dots.needle.bottom.50percent") }
+            ChatListView()
+                .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
         }
-        .safeAreaInset(edge: .top) { header }
+        .tint(T.accent)
         .sheet(isPresented: $showPair) { PairSheet().environmentObject(client) }
         .onAppear {
             ActivityManager.shared.requestNotifications()
@@ -92,7 +94,18 @@ struct RootView: View {
             if phase == .active, !client.token.isEmpty { Task { await client.poll() } }
         }
     }
+}
 
+struct UsageTab: View {
+    @EnvironmentObject var client: EdgeClient
+    @Binding var showPair: Bool
+    var body: some View {
+        ZStack {
+            T.bg.ignoresSafeArea()
+            ScrollView { Dashboard().padding(16) }
+        }
+        .safeAreaInset(edge: .top) { header }
+    }
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "bird.fill").foregroundColor(T.accent2)

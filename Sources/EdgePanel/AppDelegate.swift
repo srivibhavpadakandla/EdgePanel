@@ -146,6 +146,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { state.resolveRemote(id: id, decision: decision) }
                 return .ok("ok")
             }
+            // Chat from the phone: run Claude Code headless in a project. Body:
+            // {message, cwd?, sessionId?} → {jobId}; poll with {jobId} → the reply.
+            if request.method == "POST", path == "/chat" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let msg = obj["message"] as? String, !msg.isEmpty else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let cwd = obj["cwd"] as? String ?? ""
+                let sid = obj["sessionId"] as? String
+                guard let jid = ChatRunner.shared.start(cwd: cwd, sessionId: sid, message: msg) else {
+                    return HTTPResponse(status: 503, headers: ["Content-Type": "application/json"],
+                                        body: Data("{\"error\":\"claude CLI not found on the Mac\"}".utf8))
+                }
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                    body: Data("{\"jobId\":\"\(jid)\"}".utf8))
+            }
+            if request.method == "POST", path == "/chat/poll" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let jid = obj["jobId"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let job = ChatRunner.shared.poll(jid) ?? ChatRunner.Job(status: "error", error: "unknown job")
+                let data = (try? JSONEncoder().encode(job)) ?? Data("{}".utf8)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            }
             return .notFound()
         }
         do {
