@@ -124,6 +124,7 @@ struct Dashboard: View {
     var body: some View {
         VStack(spacing: 14) {
             if let s = client.snapshot {
+                if let q = s.question { QuestionCard(q: q) }
                 if let pend = s.pending { PermissionCard(p: pend) }
                 if let p = s.plan { PlanCard(plan: p) }
                 WorkingCard(working: s.working)
@@ -173,6 +174,78 @@ struct PlanCard: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: 16).fill(T.accentSoft))
+    }
+}
+
+struct QuestionCard: View {
+    @EnvironmentObject var client: EdgeClient
+    let q: EdgeSnapshot.Question
+    @State private var sel: [String: Set<String>] = [:]   // question → chosen labels
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 9) {
+                    Image(systemName: "questionmark.bubble.fill").foregroundColor(T.accent)
+                    Text("Claude is asking").font(.claude(15, .semibold)).foregroundColor(T.text)
+                    Spacer()
+                    if let p = q.project { Text(p).font(.claude(10)).foregroundColor(T.subtext) }
+                }
+                ForEach(q.items) { item in
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(item.question).font(.claude(13, .semibold)).foregroundColor(T.text)
+                        if item.multiSelect {
+                            Text("pick one or more").font(.claude(10)).foregroundColor(T.subtext)
+                        }
+                        ForEach(item.options, id: \.label) { opt in
+                            Button { toggle(item, opt.label) } label: {
+                                HStack(spacing: 9) {
+                                    Image(systemName: isSel(item, opt.label)
+                                          ? (item.multiSelect ? "checkmark.square.fill" : "checkmark.circle.fill")
+                                          : (item.multiSelect ? "square" : "circle"))
+                                        .foregroundColor(isSel(item, opt.label) ? T.accent : T.subtext)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(opt.label).font(.claude(13, .medium)).foregroundColor(T.text)
+                                        if let d = opt.description, !d.isEmpty {
+                                            Text(d).font(.claude(10)).foregroundColor(T.subtext).lineLimit(2)
+                                        }
+                                    }
+                                    Spacer(minLength: 4)
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .background(RoundedRectangle(cornerRadius: 9)
+                                    .fill(isSel(item, opt.label) ? T.accent.opacity(0.16) : T.track.opacity(0.5)))
+                            }.buttonStyle(.plain)
+                        }
+                    }
+                }
+                Button { submit() } label: {
+                    Text("Send answer").font(.claude(14, .semibold)).foregroundColor(.black)
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(answered ? T.accent : T.subtext.opacity(0.4)))
+                }.buttonStyle(.plain).disabled(!answered)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 16).strokeBorder(T.accent.opacity(0.55), lineWidth: 1.2))
+    }
+
+    private var answered: Bool { q.items.allSatisfy { !(sel[$0.question] ?? []).isEmpty } }
+    private func isSel(_ item: EdgeSnapshot.Question.Item, _ label: String) -> Bool {
+        (sel[item.question] ?? []).contains(label)
+    }
+    private func toggle(_ item: EdgeSnapshot.Question.Item, _ label: String) {
+        var s = sel[item.question] ?? []
+        if item.multiSelect { if s.contains(label) { s.remove(label) } else { s.insert(label) } }
+        else { s = [label] }
+        sel[item.question] = s
+    }
+    private func submit() {
+        var answers: [String: String] = [:]
+        for item in q.items {
+            let chosen = item.options.map { $0.label }.filter { (sel[item.question] ?? []).contains($0) }
+            answers[item.question] = chosen.joined(separator: ",")
+        }
+        client.answerQuestion(id: q.id, answers: answers)
     }
 }
 

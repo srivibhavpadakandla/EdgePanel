@@ -10,6 +10,7 @@ struct EdgeSnapshot: Codable {
     var chats: [Chat]
     var calendar: [CalDay]
     var pending: Pending?
+    var question: Question?
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -55,6 +56,19 @@ struct EdgeSnapshot: Codable {
         var project: String?
         var preview: [String]
         var allowRule: String
+    }
+    struct Question: Codable, Identifiable {
+        var id: String
+        var project: String?
+        var items: [Item]
+        struct Item: Codable, Identifiable {
+            var question: String
+            var header: String
+            var multiSelect: Bool
+            var options: [Opt]
+            var id: String { question }
+            struct Opt: Codable { var label: String; var description: String? }
+        }
     }
 }
 
@@ -107,6 +121,16 @@ final class EdgeClient: ObservableObject {
     }
 
     struct ChatJob: Codable { var status: String; var result: String?; var sessionId: String?; var error: String? }
+
+    /// Answer a held AskUserQuestion. answers = {questionText: "label" or "a,b"}.
+    func answerQuestion(id: String, answers: [String: String]) {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/question/decide") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "answers": answers])
+        Task { _ = try? await URLSession.shared.data(for: req); await poll() }
+    }
 
     /// Send a message to Claude Code on the Mac; returns a jobId to poll.
     func sendChat(cwd: String, sessionId: String?, message: String) async -> String? {
@@ -161,6 +185,7 @@ final class EdgeClient: ObservableObject {
             ActivityManager.shared.sync(working: snap.working)
             ActivityManager.shared.checkUsage(plan: snap.plan)
             ActivityManager.shared.syncPermission(snap.pending)
+            ActivityManager.shared.syncQuestion(snap.question)
         } catch {
             connected = false
             lastError = (error as? URLError)?.code == .cannotConnectToHost

@@ -60,6 +60,13 @@ final class NtfyPusher: @unchecked Sendable {
         publish(payload)
     }
 
+    /// "Claude is asking you" — tap to answer in the EdgePanel app (the options are
+    /// shown there; questions can be multi-select / multi-question so we don't try
+    /// to cram them into notification buttons).
+    func pushQuestion(title: String, body: String) {
+        publish(["title": title, "message": body, "tags": ["question"], "priority": 4])
+    }
+
     private func publish(_ fields: [String: Any]) {
         guard let config else { return }
         var body = fields

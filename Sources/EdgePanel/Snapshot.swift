@@ -12,6 +12,7 @@ struct EdgeSnapshot: Codable {
     var chats: [Chat]
     var calendar: [CalDay]
     var pending: Pending?      // a permission request waiting on you (approve from the phone)
+    var question: Question?    // an AskUserQuestion waiting on you (answer from the phone)
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -50,6 +51,18 @@ struct EdgeSnapshot: Codable {
         var project: String?
         var preview: [String]     // a few command / diff lines for context
         var allowRule: String
+    }
+    struct Question: Codable {
+        var id: String
+        var project: String?
+        var items: [Item]
+        struct Item: Codable {
+            var question: String
+            var header: String
+            var multiSelect: Bool
+            var options: [Opt]
+            struct Opt: Codable { var label: String; var description: String? }
+        }
     }
 
     @MainActor
@@ -91,8 +104,16 @@ struct EdgeSnapshot: Codable {
                     preview: p.preview.prefix(6).map { $0.text }, allowRule: p.allowRule)
         }
 
+        let question = state.pendingQuestion.map { q in
+            Question(id: q.id, project: q.project, items: q.items.map { item in
+                Question.Item(question: item.question, header: item.header, multiSelect: item.multiSelect,
+                              options: item.options.map { Question.Item.Opt(label: $0.label, description: $0.description) })
+            })
+        }
+
         return EdgeSnapshot(generatedAt: now.timeIntervalSince1970, plan: plan,
                             spend: Spend(fiveHourUSD: windowSpend),
-                            working: working, chats: chats, calendar: calendar, pending: pending)
+                            working: working, chats: chats, calendar: calendar,
+                            pending: pending, question: question)
     }
 }

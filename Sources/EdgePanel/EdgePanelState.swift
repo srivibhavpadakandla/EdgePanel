@@ -15,6 +15,20 @@ struct PreviewLine: Identifiable, Equatable {
     let text: String
 }
 
+/// A multiple-choice question (AskUserQuestion) the user can answer from the phone.
+struct PendingQuestion: Identifiable, Equatable {
+    struct Option: Equatable { let label: String; let description: String? }
+    struct Item: Equatable {
+        let question: String
+        let header: String
+        let multiSelect: Bool
+        let options: [Option]
+    }
+    let id: String
+    let items: [Item]
+    let project: String?
+}
+
 /// A permission request the user must approve from the panel.
 struct PendingPermission: Identifiable, Equatable {
     let id: String
@@ -44,6 +58,11 @@ final class EdgePanelState: ObservableObject {
     @Published var pending: PendingPermission?
     /// Bridges to the window controller: true → lock open + auto-reveal.
     var onApprovalChange: ((Bool) -> Void)?
+
+    // MARK: Held AskUserQuestion gate (answer from the phone)
+    @Published var pendingQuestion: PendingQuestion?
+    private var questionResolvers: [String: CheckedContinuation<[String: String], Never>] = [:]
+    private var questionCounter = 0
 
     private var resolvers: [String: CheckedContinuation<PermissionVerdict, Never>] = [:]
     private var blockingCounter = 0
@@ -182,6 +201,59 @@ final class EdgePanelState: ObservableObject {
         continuation.resume(returning: verdict)
         if pending?.id == bid { pending = nil }
         onApprovalChange?(false)              // release the lock-open
+    }
+
+    // MARK: - Held AskUserQuestion (answer from the phone)
+
+    /// Holds the AskUserQuestion PreToolUse hook open and surfaces the questions to
+    /// the phone. Returns the answer map {questionText: selectedLabel(s)} the caller
+    /// echoes back in `updatedInput`. Times out (empty) so the desktop UI can take
+    /// over if nobody answers.
+    func requestQuestionDecision(questionsData: Data, project: String?) async -> [String: String] {
+        let raw = (try? JSONSerialization.jsonObject(with: questionsData)) as? [[String: Any]] ?? []
+        let items: [PendingQuestion.Item] = raw.map { q in
+            let opts = (q["options"] as? [[String: Any]] ?? []).map {
+                PendingQuestion.Option(label: $0["label"] as? String ?? "", description: $0["description"] as? String)
+            }
+            return PendingQuestion.Item(question: q["question"] as? String ?? "",
+                                        header: q["header"] as? String ?? "",
+                                        multiSelect: (q["multiSelect"] as? Bool) ?? false, options: opts)
+        }
+        guard !items.isEmpty else { return [:] }
+        questionCounter += 1
+        let qid = "q\(questionCounter)"
+        let request = PendingQuestion(id: qid, items: items, project: project)
+        return await withCheckedContinuation { continuation in
+            questionResolvers[qid] = continuation
+            pendingQuestion = request
+            onApprovalChange?(true)
+            pushQuestionAlert(request)
+            idleTimer?.invalidate(); idleTimer = nil
+            Task { [weak self, qid] in
+                try? await Task.sleep(nanoseconds: 90 * 1_000_000_000)
+                self?.resolveQuestion(qid, [:])     // unanswered → fall back to the desktop UI
+            }
+        }
+    }
+
+    /// Resolve a held question from the phone. answers = {questionText: "label" or
+    /// "labelA,labelB" for multi-select}.
+    func resolveQuestionRemote(id: String, answers: [String: String]) { resolveQuestion(id, answers) }
+
+    private func resolveQuestion(_ qid: String, _ answers: [String: String]) {
+        guard let continuation = questionResolvers.removeValue(forKey: qid) else { return }
+        continuation.resume(returning: answers)
+        if pendingQuestion?.id == qid { pendingQuestion = nil }
+        onApprovalChange?(false)
+    }
+
+    private func pushQuestionAlert(_ q: PendingQuestion) {
+        let first = q.items.first
+        let body = first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer"
+        if APNsPusher.shared.enabled, let dt = devicePushToken {
+            APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body)
+        }
+        NtfyPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
     }
 
     static func buildPreview(_ event: HookEvent) -> [PreviewLine] {

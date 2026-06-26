@@ -63,6 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let event = HookEvent(data: request.body, endpoint: request.path)
                 let verdict = await state.requestDecision(for: event)
                 return verdict.response(for: event.eventName ?? "PreToolUse")
+            case ("POST", "/question"):
+                // Held PreToolUse hook on AskUserQuestion — surface the options to the
+                // phone, then answer by returning allow + updatedInput (echoing the
+                // questions verbatim with the chosen answers).
+                let bodyObj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
+                let questions = (bodyObj?["tool_input"] as? [String: Any])?["questions"] as? [[String: Any]] ?? []
+                guard !questions.isEmpty,
+                      let qData = try? JSONSerialization.data(withJSONObject: questions) else { return .hookAck() }
+                let project = (bodyObj?["cwd"] as? String).map { ($0 as NSString).lastPathComponent }
+                let answers = await state.requestQuestionDecision(questionsData: qData, project: project)
+                let resp: [String: Any] = ["hookSpecificOutput": [
+                    "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                    "updatedInput": ["questions": questions, "answers": answers]]]
+                let data = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data("{}".utf8)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             case ("GET", "/health"):
                 return .ok("edgepanel ok")
             case ("POST", "/debug/decide"):
@@ -144,6 +159,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
                 }
                 await MainActor.run { state.resolveRemote(id: id, decision: decision) }
+                return .ok("ok")
+            }
+            // Answer a held AskUserQuestion from the phone. Body: {id, answers:{q:label}}.
+            if request.method == "POST", path == "/question/decide" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let id = obj["id"] as? String, let answers = obj["answers"] as? [String: String] else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                await MainActor.run { state.resolveQuestionRemote(id: id, answers: answers) }
                 return .ok("ok")
             }
             // Chat from the phone: run Claude Code headless in a project. Body:

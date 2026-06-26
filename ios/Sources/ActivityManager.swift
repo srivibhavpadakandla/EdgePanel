@@ -16,6 +16,7 @@ final class ActivityManager {
     private var lastPlanPct: Double = 0
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
     private var lastPermId: String?        // permission request already surfaced
+    private var lastQuestionId: String?    // question already surfaced
 
     /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
     var onPushToken: ((String, String?, String) -> Void)?
@@ -46,6 +47,19 @@ final class ActivityManager {
         c.userInfo = ["permId": p.id]
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: "perm-\(p.id)", content: c, trigger: nil))
+    }
+
+    /// Notify when Claude asks a question (the options are answered in-app).
+    func syncQuestion(_ question: EdgeSnapshot.Question?) {
+        guard let q = question else { lastQuestionId = nil; return }
+        guard q.id != lastQuestionId else { return }
+        lastQuestionId = q.id
+        let c = UNMutableNotificationContent()
+        c.title = "Claude is asking you"
+        c.body = q.items.first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer"
+        c.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "q-\(q.id)", content: c, trigger: nil))
     }
 
     /// Reconcile the aggregate Live Activity with the current working sessions.
