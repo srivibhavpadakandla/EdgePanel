@@ -32,6 +32,19 @@ final class ActivityManager {
             UNNotificationCategory(identifier: "PERMISSION", actions: [allow, deny],
                                    intentIdentifiers: [], options: [])
         ])
+        observePushToStart()
+    }
+
+    /// Forward the push-to-start token (iOS 17.2+) to the Mac, so it can pop the
+    /// Dynamic Island up even when the app is fully closed.
+    private func observePushToStart() {
+        guard #available(iOS 17.2, *) else { return }
+        Task {
+            for await tokenData in Activity<WorkingAttributes>.pushToStartTokenUpdates {
+                let hex = tokenData.map { String(format: "%02x", $0) }.joined()
+                onPushToken?("starttoken", nil, hex)
+            }
+        }
     }
 
     /// Surface a NEW permission request as an actionable local notification (works
@@ -66,6 +79,12 @@ final class ActivityManager {
     /// Reconcile the aggregate Live Activity with the current working sessions.
     func sync(working: [EdgeSnapshot.Working]) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        // Adopt an activity the Mac push-started while we were closed, so we drive the
+        // same one (update/end) instead of creating a duplicate.
+        if aggregate == nil, let existing = Activity<WorkingAttributes>.activities.first {
+            aggregate = existing
+            observePushToken(existing)
+        }
         let nowIds = Set(working.map { $0.id })
 
         // Sessions that were running last tick but aren't now → finished → notify.

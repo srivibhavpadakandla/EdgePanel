@@ -54,6 +54,22 @@ final class APNsPusher: @unchecked Sendable {
              topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity")
     }
 
+    /// Push-to-start (iOS 17.2+): create the Live Activity even when the app isn't
+    /// running, so the Dynamic Island pops up on its own when work begins.
+    func pushStart(token: String, contentState: [String: Any], attributes: [String: Any]) {
+        guard let config else { return }
+        let aps: [String: Any] = [
+            "timestamp": Int(Date().timeIntervalSince1970),
+            "event": "start",
+            "content-state": contentState,
+            "attributes-type": "WorkingAttributes",
+            "attributes": attributes,
+            "alert": ["title": "Claude is working", "body": "tap to watch it live"]
+        ]
+        send(token: token, payload: ["aps": aps],
+             topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity")
+    }
+
     /// Push a plain alert notification to the device token (usage / done fallback).
     func pushAlert(deviceToken: String, title: String, body: String) {
         guard let config else { return }

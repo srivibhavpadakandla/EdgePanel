@@ -296,11 +296,15 @@ final class EdgePanelState: ObservableObject {
     private var activityPushTokens: [String: String] = [:]   // sessionId → Live Activity token
     private var devicePushToken: String?
 
+    private var pushToStartToken: String?     // iOS 17.2+ push-to-start (pop the Island up while closed)
+    private var startPushPending = false
+
     func setPushToken(kind: String, sessionId: String?, token: String) {
         switch kind {
-        case "activity": if let sid = sessionId { activityPushTokens[sid] = token }
-        case "device":   devicePushToken = token
-        default:         break
+        case "activity":  if let sid = sessionId { activityPushTokens[sid] = token }
+        case "device":    devicePushToken = token
+        case "starttoken": pushToStartToken = token
+        default:          break
         }
         NSLog("EdgePanel push token received: kind=\(kind) sid=\(sessionId ?? "-") token=\(token.prefix(12))…")
     }
@@ -313,17 +317,41 @@ final class EdgePanelState: ObservableObject {
     /// Push on membership change, AND every ~12s while running so the token counts
     /// refresh on the Lock Screen (tokens don't self-tick like the timer does).
     func pushAggregate(working: [LiveSession]) {
-        guard APNsPusher.shared.enabled, let token = activityPushTokens["edgepanel"] else { return }
+        guard APNsPusher.shared.enabled else { return }
         let ids = Set(working.map { $0.id })
         let membershipChanged = ids != lastPushedWorkingIds
+
+        // Work ended with no live activity to push to → reset so a fresh start fires next time.
+        if working.isEmpty && activityPushTokens["edgepanel"] == nil {
+            lastPushedWorkingIds = []; startPushPending = false; return
+        }
+
+        // No per-activity token (app not running) but work just began → PUSH-TO-START
+        // so the Island pops up on its own. Once per work session (until the app sends
+        // a real activity token or work ends).
+        if !working.isEmpty, activityPushTokens["edgepanel"] == nil, let st = pushToStartToken, !startPushPending {
+            startPushPending = true
+            lastPushedWorkingIds = ids; lastAggregatePush = Date()
+            APNsPusher.shared.pushStart(token: st, contentState: aggregateState(working), attributes: ["id": "edgepanel"])
+            return
+        }
+
+        guard let token = activityPushTokens["edgepanel"] else { lastPushedWorkingIds = ids; return }
+        startPushPending = false                       // the app has a live activity now
         guard membershipChanged || (!working.isEmpty && Date().timeIntervalSince(lastAggregatePush) > 12) else { return }
         lastPushedWorkingIds = ids
         lastAggregatePush = Date()
         if working.isEmpty {
             APNsPusher.shared.pushActivity(token: token, event: "end",
                 contentState: ["sessions": [[String: Any]](), "done": true, "doneDetail": "finished"])
+            activityPushTokens["edgepanel"] = nil      // ended → allow a fresh push-to-start next time
             return
         }
+        APNsPusher.shared.pushActivity(token: token, event: "update", contentState: aggregateState(working))
+    }
+
+    /// The aggregate Live Activity content-state (mirrors iOS WorkingAttributes.ContentState).
+    private func aggregateState(_ working: [LiveSession]) -> [String: Any] {
         let freezeAt = Date().addingTimeInterval(90).timeIntervalSince1970
         let sessions: [[String: Any]] = working.map { sn in
             ["id": sn.id, "project": sn.project,
@@ -331,8 +359,7 @@ final class EdgePanelState: ObservableObject {
              "startEpoch": sn.promptAt?.timeIntervalSince1970 ?? Date().timeIntervalSince1970,
              "tokens": sn.turnTokens, "freezeAt": freezeAt]
         }
-        APNsPusher.shared.pushActivity(token: token, event: "update",
-            contentState: ["sessions": sessions, "done": false])
+        return ["sessions": sessions, "done": false]
     }
 
     /// Alert the phone that a permission is waiting — so you can Allow/Deny even with
