@@ -114,7 +114,7 @@ final class ActivityManager {
                 await act.update(ActivityContent(state: done, staleDate: nil))
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 await act.end(ActivityContent(state: done, staleDate: nil),
-                              dismissalPolicy: .after(Date().addingTimeInterval(15)))
+                              dismissalPolicy: .after(Date().addingTimeInterval(6)))
             }
             aggregate = nil
             pushTokenTask?.cancel(); pushTokenTask = nil
@@ -144,14 +144,22 @@ final class ActivityManager {
 
     /// Forward the Live Activity's APNs push token to the Mac, so it can end/update
     /// the Island via push when the app is suspended or fully closed (Tier 2).
+    private var lastActivityTokenHex: String?
     private func observePushToken(_ act: Activity<WorkingAttributes>) {
         pushTokenTask?.cancel()
         pushTokenTask = Task {
             for await tokenData in act.pushTokenUpdates {
                 let hex = tokenData.map { String(format: "%02x", $0) }.joined()
+                lastActivityTokenHex = hex
                 onPushToken?("activity", "edgepanel", hex)
             }
         }
+    }
+
+    /// Re-send the current activity token to the Mac (e.g. after the Mac restarted and
+    /// forgot it) so it can always push the "end" instead of leaving the Island stuck.
+    func resendActivityToken() {
+        if let hex = lastActivityTokenHex { onPushToken?("activity", "edgepanel", hex) }
     }
 
     /// Usage guardrail: notify once when crossing 80% / 90% (re-arms on reset).

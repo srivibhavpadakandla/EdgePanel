@@ -48,7 +48,8 @@ final class APNsPusher: @unchecked Sendable {
         guard let config else { return }
         var aps: [String: Any] = ["timestamp": Int(Date().timeIntervalSince1970),
                                   "event": event, "content-state": contentState]
-        if event == "end" { aps["dismissal-date"] = Int(Date().addingTimeInterval(30).timeIntervalSince1970) }
+        // Show the "done" screen briefly, then auto-dismiss.
+        if event == "end" { aps["dismissal-date"] = Int(Date().addingTimeInterval(6).timeIntervalSince1970) }
         if let alert { aps["alert"] = alert }
         send(token: token, payload: ["aps": aps],
              topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity")

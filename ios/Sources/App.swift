@@ -91,7 +91,10 @@ struct RootView: View {
         // Reconcile the moment the app returns to the foreground, so a stale "still
         // counting" Live Activity self-heals instantly on open.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, !client.token.isEmpty { Task { await client.poll() } }
+            if phase == .active, !client.token.isEmpty {
+                ActivityManager.shared.resendActivityToken()   // re-arm push end after a Mac restart
+                Task { await client.poll() }
+            }
         }
     }
 }
