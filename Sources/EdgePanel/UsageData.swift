@@ -458,7 +458,10 @@ extension UsageLoader {
 
         var out: [LiveSession] = []
         for (u, mod) in recent.prefix(limit) {
-            guard let data = try? Data(contentsOf: u), let text = String(data: data, encoding: .utf8) else { continue }
+            // The current turn lives at the END of the transcript — read only the
+            // tail so this stays cheap enough to refresh every couple of seconds
+            // even when the active session's transcript is many MB.
+            guard let text = tailString(u, maxBytes: 6_000_000) else { continue }
             let objs = text.split(separator: "\n", omittingEmptySubsequences: true)
                 .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
 
@@ -662,6 +665,20 @@ extension UsageLoader {
         if let d = a as? Double { return Int(d) }
         if let n = a as? NSNumber { return n.intValue }
         return 0
+    }
+
+    /// The last `maxBytes` of a file as text, dropping the partial first line.
+    /// Lets the working-session scan stay fast on huge transcripts.
+    private static func tailString(_ url: URL, maxBytes: Int) -> String? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+        let size = (try? fh.seekToEnd()) ?? 0
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? fh.seek(toOffset: start)
+        let data = (try? fh.readToEnd()) ?? Data()
+        guard var text = String(data: data, encoding: .utf8) else { return nil }
+        if start > 0, let nl = text.firstIndex(of: "\n") { text = String(text[text.index(after: nl)...]) }
+        return text
     }
 }
 

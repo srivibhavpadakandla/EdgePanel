@@ -27,10 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onApprovalChange = { [weak controller] pending in
             controller?.approvalPending = pending
         }
+        // Tier 2: when a session finishes, push a "done" update to the phone.
+        store.onSessionEnded = { [weak self] s in self?.state.pushSessionEnded(s) }
 
         startServer()
         startLANServer()
         setupDebugToggle()
+        if ProcessInfo.processInfo.environment["EDGEPANEL_SHOW_PAIRING"] == "1" { showPairing() }
         NSLog("EdgePanel launched — Phase 1 (live Usage + hook pipe). Right-edge to reveal · kill -USR1 \(ProcessInfo.processInfo.processIdentifier)")
     }
 
@@ -122,6 +125,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { state.openChat(cwd: cwd, id: id) }
                 return .ok("opening")
             }
+            // Register an APNs push token (Tier 2). Body: {kind, token, sessionId?}.
+            if request.method == "POST", path == "/pushtoken" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let kind = obj["kind"] as? String, let tok = obj["token"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let sid = obj["sessionId"] as? String
+                await MainActor.run { state.setPushToken(kind: kind, sessionId: sid, token: tok) }
+                return .ok("ok")
+            }
             return .notFound()
         }
         do {
@@ -173,9 +186,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
             let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
+            let pair = NSMenuItem(title: "Pair iPhone…", action: #selector(showPairing), keyEquivalent: "")
             let quit = NSMenuItem(title: "Quit EdgePanel", action: #selector(quit), keyEquivalent: "q")
-            for it in [toggle, quit] { it.target = self }
-            menu.addItem(toggle); menu.addItem(.separator()); menu.addItem(quit)
+            for it in [toggle, pair, quit] { it.target = self }
+            menu.addItem(toggle); menu.addItem(pair); menu.addItem(.separator()); menu.addItem(quit)
             statusItem?.menu = menu
             statusItem?.button?.performClick(nil)
             statusItem?.menu = nil
@@ -186,6 +200,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePanel() { controller?.toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    private var pairingWindow: NSWindow?
+    @objc private func showPairing() {
+        let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_LAN_PORT"] ?? "") ?? 8788
+        let view = PairingView(host: "\(Self.lanIP()):\(port)", token: pairingToken())
+        if pairingWindow == nil {
+            let win = NSWindow(contentViewController: NSHostingController(rootView: view))
+            win.title = "Pair iPhone"
+            win.styleMask = [.titled, .closable]
+            win.isReleasedWhenClosed = false
+            pairingWindow = win
+        } else {
+            (pairingWindow?.contentViewController as? NSHostingController<PairingView>)?.rootView = view
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        pairingWindow?.center()
+        pairingWindow?.makeKeyAndOrderFront(nil)
+    }
 
     // MARK: - Debug toggle (headless verification)
 

@@ -2,12 +2,23 @@ import SwiftUI
 
 @main
 struct EdgePanelMobileApp: App {
-    @StateObject private var client = EdgeClient()
+    @UIApplicationDelegateAdaptor(PushDelegate.self) private var pushDelegate
+    @StateObject private var client = EdgeClient.shared
     var body: some Scene {
         WindowGroup {
             RootView().environmentObject(client)
                 .preferredColorScheme(.dark)
         }
+    }
+}
+
+/// Forwards the APNs device token to the Mac (Tier 2 alerts). Needs the push
+/// entitlement + a paid Apple Developer account to actually receive a token.
+final class PushDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        Task { @MainActor in EdgeClient.shared.postPushToken(kind: "device", sessionId: nil, pushToken: hex) }
     }
 }
 
@@ -140,8 +151,13 @@ struct WorkingRow: View {
                 + Text("\u{201C}\(w.display)\u{201D}").font(.claude(14)).italic().foregroundColor(T.text.opacity(0.9)))
                 .lineLimit(3)
             HStack(spacing: 5) {
-                Text(fmtTokens(w.turnTokens)).font(.claude(14, .semibold)).foregroundColor(T.text)
-                Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
+                if w.turnTokens == 0 {
+                    Text("starting…").font(.claude(12)).foregroundColor(T.subtext)
+                    Text("· \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
+                } else {
+                    Text(fmtTokens(w.turnTokens)).font(.claude(14, .semibold)).foregroundColor(T.text)
+                    Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -296,9 +312,17 @@ struct PairSheet: View {
     @Environment(\.dismiss) var dismiss
     @State private var host = ""
     @State private var token = ""
+    @State private var showScanner = false
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button { showScanner = true } label: {
+                        Label("Scan QR from your Mac", systemImage: "qrcode.viewfinder")
+                    }
+                } footer: {
+                    Text("On your Mac: EdgePanel menu-bar icon → Pair iPhone…")
+                }
                 Section("Mac address") {
                     TextField("192.168.1.20:8788", text: $host)
                         .autocorrectionDisabled().textInputAutocapitalization(.never)
@@ -324,6 +348,20 @@ struct PairSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
             .onAppear { host = client.host; token = client.token }
+            .sheet(isPresented: $showScanner) {
+                NavigationStack {
+                    QRScanner { code in
+                        if let c = URLComponents(string: code), c.scheme == "edgepanel" {
+                            if let h = c.queryItems?.first(where: { $0.name == "host" })?.value { host = h }
+                            if let t = c.queryItems?.first(where: { $0.name == "token" })?.value { token = t }
+                        }
+                        showScanner = false
+                    }
+                    .ignoresSafeArea()
+                    .navigationTitle("Scan")
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showScanner = false } } }
+                }
+            }
         }
     }
 }

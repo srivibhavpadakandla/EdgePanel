@@ -26,6 +26,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.srivibhav.edgepanel.mobile
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        # Tier 2 push. Honored on device builds with your Apple Developer account;
+        # ignored on unsigned simulator builds.
+        CODE_SIGN_ENTITLEMENTS: EdgePanelMobile.entitlements
 
   EdgePanelWidgets:
     type: app-extension

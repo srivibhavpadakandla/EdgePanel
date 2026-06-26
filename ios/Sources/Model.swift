@@ -49,6 +49,7 @@ struct EdgeSnapshot: Codable {
 
 @MainActor
 final class EdgeClient: ObservableObject {
+    static let shared = EdgeClient()
     @Published var snapshot: EdgeSnapshot?
     @Published var connected = false
     @Published var lastError: String?
@@ -59,15 +60,30 @@ final class EdgeClient: ObservableObject {
     private var timer: Timer?
 
     func start() {
+        ActivityManager.shared.onPushToken = { [weak self] kind, sid, tok in
+            self?.postPushToken(kind: kind, sessionId: sid, pushToken: tok)
+        }
         Task { await poll() }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { await self?.poll() }
         }
     }
     func stop() { timer?.invalidate(); timer = nil }
 
-    /// Ask the Mac to resume this chat (opens it in Terminal on the Mac).
+    /// Forward an APNs token to the Mac (Tier 2).
+    func postPushToken(kind: String, sessionId: String?, pushToken: String) {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/pushtoken") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        var body: [String: Any] = ["kind": kind, "token": pushToken]
+        if let sessionId { body["sessionId"] = sessionId }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        Task { _ = try? await URLSession.shared.data(for: req) }
+    }
+
+    /// Ask the Mac to resume this chat (opens it in VS Code on the Mac).
     func openChat(_ chat: EdgeSnapshot.Chat) {
         guard let url = URL(string: "http://\(host)/open") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)

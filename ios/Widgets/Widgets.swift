@@ -45,7 +45,7 @@ struct WorkingLiveActivity: Widget {
                             .font(.system(size: 13, design: .serif))
                             .foregroundColor(.white.opacity(0.9)).lineLimit(2)
                         if !context.state.done {
-                            Text("\(fmtTok(context.state.tokens)) tokens this turn")
+                            Text(context.state.tokens == 0 ? "starting…" : "\(fmtTok(context.state.tokens)) tokens this turn")
                                 .font(.system(size: 11)).foregroundColor(.gray)
                         }
                     }
@@ -92,7 +92,8 @@ struct LockScreenView: View {
                 Text(state.done ? (state.doneDetail ?? "finished") : "“\(state.prompt)”")
                     .font(.system(size: 13, design: .serif)).foregroundColor(.white.opacity(0.85)).lineLimit(2)
                 if !state.done {
-                    Text("\(fmtTok(state.tokens)) tokens this turn").font(.system(size: 11)).foregroundColor(.gray)
+                    Text(state.tokens == 0 ? "starting…" : "\(fmtTok(state.tokens)) tokens this turn")
+                        .font(.system(size: 11)).foregroundColor(.gray)
                 }
             }
         }

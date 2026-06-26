@@ -1,5 +1,6 @@
 import ActivityKit
 import UserNotifications
+import UIKit
 import Foundation
 
 /// Drives Live Activities (Dynamic Island) from the working-now state, and fires
@@ -13,8 +14,14 @@ final class ActivityManager {
     private var lastPlanPct: Double = 0
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
 
+    /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
+    var onPushToken: ((String, String?, String) -> Void)?
+
     func requestNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
+            guard ok else { return }
+            Task { @MainActor in UIApplication.shared.registerForRemoteNotifications() }   // device token (Tier 2)
+        }
     }
 
     /// Reconcile Live Activities with the current working sessions.
@@ -32,8 +39,15 @@ final class ActivityManager {
                 Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
             } else if activities.count < 2 {            // keep the Island uncluttered
                 if let act = try? Activity.request(attributes: WorkingAttributes(sessionId: w.id),
-                                                   content: ActivityContent(state: state, staleDate: nil)) {
+                                                   content: ActivityContent(state: state, staleDate: nil),
+                                                   pushType: .token) {
                     activities[w.id] = act
+                    let sid = w.id
+                    Task { @MainActor in   // forward the Live Activity push token to the Mac (Tier 2)
+                        for await data in act.pushTokenUpdates {
+                            self.onPushToken?("activity", sid, data.map { String(format: "%02x", $0) }.joined())
+                        }
+                    }
                 }
             }
             last[w.id] = w

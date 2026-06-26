@@ -22,6 +22,11 @@ final class UsageStore: ObservableObject {
 
     // Live "which chats are working" list.
     @Published var sessions: [LiveSession] = []
+    // Fires when a working session finishes (was generating, now done) — used to
+    // push a "done" Live Activity update + notification to the phone (Tier 2).
+    var onSessionEnded: ((LiveSession) -> Void)?
+    private var prevWorking: [String: LiveSession] = [:]
+
     // Recent Claude Code chats (sessions), newest first.
     @Published var recentChats: [RecentChat] = []
     // sessionID → short summary of its (long) prompt, from the claude CLI.
@@ -66,8 +71,8 @@ final class UsageStore: ObservableObject {
         loadPlan()
         timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in self?.load() }
         planTimer = Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in self?.loadPlan() }
-        // Keep the "working chats" list fresh (cheap: only reads recently-touched files).
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in self?.refreshSessions() }
+        // Keep the working sessions + tokens fresh (cheap: tail-reads recent files).
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshSessions() }
     }
 
     func refreshSessions() {
@@ -76,8 +81,16 @@ final class UsageStore: ObservableObject {
             DispatchQueue.main.async {
                 self.sessions = sessions
                 self.updateSummaries(sessions)
+                self.detectEnded()
             }
         }
+    }
+
+    /// Fire onSessionEnded for sessions that were generating and now aren't.
+    private func detectEnded() {
+        let working = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
+        for (id, prev) in prevWorking where working[id] == nil { onSessionEnded?(prev) }
+        prevWorking = working
     }
 
     /// Summarize long, title-less chat names (the claude CLI), keyed by chat id.
@@ -120,6 +133,7 @@ final class UsageStore: ObservableObject {
                 self.recentChats = chats
                 self.updateSummaries(sessions)
                 self.updateChatSummaries(chats)
+                self.detectEnded()
             }
         }
     }

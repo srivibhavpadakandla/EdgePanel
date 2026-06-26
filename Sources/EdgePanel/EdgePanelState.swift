@@ -202,6 +202,36 @@ final class EdgePanelState: ObservableObject {
         try? p.run()
     }
 
+    // MARK: - APNs (Tier 2) push tokens + Mac-driven pushes
+
+    private var activityPushTokens: [String: String] = [:]   // sessionId → Live Activity token
+    private var devicePushToken: String?
+
+    func setPushToken(kind: String, sessionId: String?, token: String) {
+        switch kind {
+        case "activity": if let sid = sessionId { activityPushTokens[sid] = token }
+        case "device":   devicePushToken = token
+        default:         break
+        }
+    }
+
+    /// Push an "end" Live Activity update + alert when a session finishes — so the
+    /// phone updates even if the app is closed. No-op unless APNs is configured.
+    func pushSessionEnded(_ s: LiveSession) {
+        guard APNsPusher.shared.enabled else { return }
+        let detail = "\(fmtTokens(s.turnTokens)) tokens"
+        if let tok = activityPushTokens[s.id] {
+            let state: [String: Any] = ["project": s.project, "prompt": s.promptText ?? "",
+                                        "startEpoch": s.promptAt?.timeIntervalSince1970 ?? 0,
+                                        "tokens": s.turnTokens, "done": true, "doneDetail": detail]
+            APNsPusher.shared.pushActivity(token: tok, event: "end", contentState: state)
+            activityPushTokens[s.id] = nil
+        }
+        if let dt = devicePushToken {
+            APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
+        }
+    }
+
     /// "Take me there": open the chat's project in VS Code (or Cursor) — where
     /// the Claude Code extension lives — rather than a separate Terminal.
     func openChat(cwd: String?, id: String) {

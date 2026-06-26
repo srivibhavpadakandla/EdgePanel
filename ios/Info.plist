@@ -33,6 +33,8 @@
     </array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>EdgePanel connects to the EdgePanel app on your Mac over your local network to show your live Claude Code usage.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>EdgePanel uses the camera to scan the pairing QR code shown by the EdgePanel app on your Mac.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

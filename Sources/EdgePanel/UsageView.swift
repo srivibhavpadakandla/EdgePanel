@@ -260,10 +260,14 @@ struct SessionsCard: View {
                                 + Text("\u{201C}\(promptLine(s))\u{201D}").font(.claude(12)).italic().foregroundColor(theme.text.opacity(0.88)))
                                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                             HStack(spacing: 5) {
-                                Text(fmtTokens(s.turnTokens)).font(.claude(13, .semibold)).foregroundColor(theme.text)
-                                Text("tokens this turn").font(.claude(10)).foregroundColor(theme.subtext)
-                                Text("·").font(.claude(10)).foregroundColor(theme.subtext)
-                                Text(s.model.map(prettyModel) ?? "Claude").font(.claude(10)).foregroundColor(theme.subtext)
+                                if s.turnTokens == 0 {
+                                    Text("starting…").font(.claude(11)).foregroundColor(theme.subtext)
+                                    Text("· \(s.model.map(prettyModel) ?? "Claude")").font(.claude(10)).foregroundColor(theme.subtext)
+                                } else {
+                                    Text(fmtTokens(s.turnTokens)).font(.claude(13, .semibold)).foregroundColor(theme.text)
+                                    Text("tokens this turn · \(s.model.map(prettyModel) ?? "Claude")")
+                                        .font(.claude(10)).foregroundColor(theme.subtext)
+                                }
                             }
                         }
                         .padding(.vertical, 3)

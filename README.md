@@ -12,8 +12,8 @@ Slam your cursor to the right edge of the screen and EdgePanel slides in. Move a
 - **Live plan usage.** Your 5-hour and weekly limits — percent, reset countdown, and burn rate — straight from Claude Code's own usage endpoint.
 - **Working now.** Which chats are *mid-response right now*: the project, the prompt you gave it (auto-summarized by Claude when it's long), a live clock since you hit enter, and the tokens that turn has used.
 - **Days-used calendar.** A GitHub-style heatmap of your Claude Code activity this month, with a streak badge.
-- **5-hour spend + per-model split.** Estimated API-rate cost for the current window, broken down Opus / Sonnet / Haiku.
-- **Recent activity.** The last tool calls of your active session, parsed from the transcript. Click a file row to open it.
+- **5-hour spend.** Estimated API-rate cost for the current window.
+- **Recent chats.** Your latest Claude Code sessions, named by Claude Code's own `ai-title` (or a summarized first prompt). Click one to open its project in VS Code.
 - **Inline permission approval** *(optional, hook-wired).* Approve / Deny / Always on tool requests right from the panel — risk-colored, with a command or diff preview. The panel auto-reveals when a request fires and won't hide until you decide.
 
 ## Requirements
@@ -40,8 +40,8 @@ It runs as a menu-bar agent (a `sidebar.right` icon — no dock icon). Flick you
 **The data — no hooks needed.** Everything in the panel is read from disk:
 
 - Plan % / weekly come from Claude Code's `/api/oauth/usage` endpoint (keychain token), cached to `~/ClaudeUsage/plan.json`.
-- Spend, the per-model split, and the calendar are aggregated from your `~/.claude/projects/**/*.jsonl` transcripts.
-- "Working now" + the activity feed are parsed live from those transcripts — a turn counts as *working* until its final assistant message reports `stop_reason: end_turn`.
+- Spend and the calendar are aggregated from your `~/.claude/projects/**/*.jsonl` transcripts.
+- "Working now" + recent chats are parsed live from those transcripts — a turn counts as *working* until its final assistant message reports `stop_reason: end_turn`.
 - Long prompts are shortened by shelling out to your local `claude` CLI (Haiku, `--no-session-persistence`, hooks-free), cached per prompt so each is summarized once.
 
 **Live status + inline approval — optional, hook-wired.** EdgePanel embeds a loopback-only HTTP/1.1 server (`PerchCore`) on `127.0.0.1:8787`. Point Claude Code's `"type":"http"` hooks at it for live run status and a **held** `/permission` round-trip: the panel auto-reveals, you tap a button, and the decision returns to Claude Code as `permissionDecision` JSON. If EdgePanel isn't running, the hooks fail open (non-blocking) and Claude Code behaves normally.
@@ -89,3 +89,49 @@ Add to a project's `.claude/settings.json`:
 - Window scaffolding and hook plumbing reuse **PerchCore** (from the Perch notch overlay).
 - The pixel mascot is rendered from [ClaudePix](https://claudepix.vercel.app/) sprites.
 - Not affiliated with Anthropic. "Claude" and "Claude Code" are Anthropic's.
+
+## iPhone companion (`ios/`)
+
+A SwiftUI app that mirrors the panel on your phone — plan %, working-now (live
+timer + tokens), the days-used calendar, weekly, 5H spend, and recent chats —
+plus a **Live Activity / Dynamic Island** timer while a prompt runs.
+
+```sh
+cd ios
+xcodegen generate
+open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simulator
+```
+
+**Pairing.** Mac: menu-bar icon → **Pair iPhone…** shows a QR (host + token).
+Phone: **gear → Scan QR from your Mac** (or type the address + token). Both
+devices must be on the same network. The Mac serves a token-protected
+`GET /snapshot` on `:8788` (and `POST /open` to open a chat on the Mac).
+
+**Live Activity (Tier 1, no account needed).** When a prompt starts, the app
+shows a Dynamic Island activity with the project + a self-ticking timer; it flips
+to a ✓ done state and posts a local notification when the turn ends, and warns at
+80% / 90% of your 5-hour limit. Done/usage delivery happens while the app is
+running (foreground or recently backgrounded); the timer ticks regardless.
+
+### Tier 2 — push when the app is closed (optional, needs a paid account)
+
+For the done/permission/usage alerts to arrive when the app is fully closed or
+off your home network, the Mac pushes via APNs. Set up once:
+
+1. In your Apple Developer account, create an **APNs Auth Key** (`.p8`), note its
+   **Key ID** and your **Team ID**, and enable Push for the app's bundle id.
+2. Build the iOS app onto a real device signed with your team (the
+   `aps-environment` entitlement is already wired).
+3. On the Mac, create `~/.edgepanel/apns.json`:
+
+   ```json
+   {
+     "teamId": "ABCDE12345",
+     "keyId": "KEY1234567",
+     "keyPath": "~/.edgepanel/AuthKey_KEY1234567.p8",
+     "bundleId": "com.srivibhav.edgepanel.mobile"
+   }
+   ```
+
+Absent that file, push is disabled and Tier 1 (local) is used. *(The APNs path is
+code-complete but unverified — it needs the key + a device to exercise.)*
