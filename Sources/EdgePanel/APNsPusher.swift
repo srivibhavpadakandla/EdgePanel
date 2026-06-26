@@ -15,7 +15,7 @@ import Foundation
 import CryptoKit
 
 struct APNsConfig {
-    let teamId, keyId, bundleId: String
+    let teamId, keyId, bundleId, host: String
     let key: P256.Signing.PrivateKey
 
     static func load() -> APNsConfig? {
@@ -27,7 +27,11 @@ struct APNsConfig {
         let pemPath = (keyPath as NSString).expandingTildeInPath
         guard let pem = try? String(contentsOfFile: pemPath, encoding: .utf8),
               let key = try? P256.Signing.PrivateKey(pemRepresentation: pem) else { return nil }
-        return APNsConfig(teamId: team, keyId: kid, bundleId: bundle, key: key)
+        // Dev/sideloaded builds (aps-environment:development) get SANDBOX tokens, which
+        // must be pushed via the sandbox host. Set "env":"production" for App Store builds.
+        let env = (j["env"] as? String)?.lowercased() ?? "sandbox"
+        let host = env == "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com"
+        return APNsConfig(teamId: team, keyId: kid, bundleId: bundle, host: host, key: key)
     }
 }
 
@@ -69,7 +73,8 @@ final class APNsPusher: @unchecked Sendable {
     }
 
     private func send(token: String, payload: [String: Any], topic: String, pushType: String) {
-        guard let url = URL(string: "https://api.push.apple.com/3/device/\(token)"),
+        let host = config?.host ?? "api.sandbox.push.apple.com"
+        guard let url = URL(string: "https://\(host)/3/device/\(token)"),
               let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
