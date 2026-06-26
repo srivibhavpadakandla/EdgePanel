@@ -71,11 +71,15 @@ final class ActivityManager {
         let finished = last.values.filter { !nowIds.contains($0.id) }
         for w in finished { notify(title: "✓ \(w.project) finished", body: doneDetail(w)) }
 
+        // The timer freezes ~90s after the last update — so on the Lock Screen it
+        // stops on its own instead of ticking forever once a turn finishes while the
+        // app is suspended. While the app is alive each update pushes this forward.
+        let freezeAt = Date().addingTimeInterval(90).timeIntervalSince1970
         let lines = working.map { w in
             WorkingAttributes.Line(
                 id: w.id, project: w.project, prompt: w.display,
                 startEpoch: w.promptAtEpoch ?? Date().timeIntervalSince1970,
-                tokens: w.turnTokens)
+                tokens: w.turnTokens, freezeAt: freezeAt)
         }
         last = Dictionary(working.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 

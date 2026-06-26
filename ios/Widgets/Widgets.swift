@@ -40,7 +40,7 @@ struct WorkingLiveActivity: Widget {
                             Label("done", systemImage: "checkmark.circle.fill").foregroundColor(olive)
                                 .font(.system(size: 13, weight: .semibold))
                         } else if let p = s.primary {
-                            Text(p.start, style: .timer)
+                            Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                                 .font(.system(size: 15, weight: .semibold, design: .monospaced))
                                 .foregroundColor(olive).monospacedDigit()
                                 .frame(maxWidth: 62, alignment: .trailing)
@@ -78,7 +78,7 @@ struct WorkingLiveActivity: Widget {
                 if s.done {
                     Image(systemName: "checkmark").foregroundColor(olive)
                 } else if let p = s.primary {
-                    Text(p.start, style: .timer)
+                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(olive).monospacedDigit().frame(maxWidth: 50)
                 }
@@ -122,7 +122,7 @@ private struct SessionRow: View {
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(s.start, style: .timer)
+                Text(timerInterval: s.start...s.freezeEnd, countsDown: false)
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(olive).monospacedDigit().frame(maxWidth: 54, alignment: .trailing)
                 Text(s.tokens == 0 ? "starting…" : "\(fmtTok(s.tokens)) tok")
@@ -146,7 +146,7 @@ struct LockScreenView: View {
                 if state.done {
                     Text("done").font(.system(size: 13, weight: .semibold)).foregroundColor(olive)
                 } else if let p = state.primary {
-                    Text(p.start, style: .timer)
+                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))
                         .foregroundColor(olive).monospacedDigit().frame(maxWidth: 70, alignment: .trailing)
                 }

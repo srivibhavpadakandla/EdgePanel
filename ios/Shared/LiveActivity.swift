@@ -15,7 +15,12 @@ struct WorkingAttributes: ActivityAttributes {
         var prompt: String
         var startEpoch: Double      // when the prompt was submitted (self-ticking timer)
         var tokens: Int
+        var freezeAt: Double = 0    // wall-clock the timer stops at (app refreshes it forward while alive)
         var start: Date { Date(timeIntervalSince1970: startEpoch) }
+        /// Upper bound for the bounded timer — the count-up freezes here once the app
+        /// stops updating (e.g. phone locked), so it doesn't tick forever after a turn
+        /// finishes off-screen.
+        var freezeEnd: Date { Date(timeIntervalSince1970: max(freezeAt, startEpoch + 1)) }
     }
     public struct ContentState: Codable, Hashable {
         var sessions: [Line]        // every prompt running right now
