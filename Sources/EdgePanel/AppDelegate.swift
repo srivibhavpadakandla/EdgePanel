@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import PerchCore
+import Darwin
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -11,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = UsageStore()
     private let state = EdgePanelState()
     private var server: HTTPServer?
+    private var lanServer: HTTPServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -27,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         startServer()
+        startLANServer()
         setupDebugToggle()
         NSLog("EdgePanel launched — Phase 1 (live Usage + hook pipe). Right-edge to reveal · kill -USR1 \(ProcessInfo.processInfo.processIdentifier)")
     }
@@ -74,6 +77,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("EdgePanel server FAILED on port \(port): \(error.localizedDescription) (hooks will be non-blocking)")
         }
         self.server = server
+    }
+
+    // MARK: - LAN bridge for the iPhone companion (token-protected)
+
+    private func pairingToken() -> String {
+        let key = "edgepanel.pairingToken"
+        if let t = UserDefaults.standard.string(forKey: key), !t.isEmpty { return t }
+        let t = UUID().uuidString
+        UserDefaults.standard.set(t, forKey: key)
+        return t
+    }
+
+    private func startLANServer() {
+        let token = pairingToken()
+        let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_LAN_PORT"] ?? "") ?? 8788
+        let store = self.store, state = self.state
+        let server = HTTPServer(port: port, loopbackOnly: false) { request in
+            let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
+            if request.method == "GET", path == "/health" { return .ok("edgepanel-lan ok") }
+            // Auth: X-EdgePanel-Token header, or ?token= query.
+            let headerTok = request.headers["x-edgepanel-token"]
+            let queryTok = request.path.contains("token=")
+                ? request.path.components(separatedBy: "token=").last?.components(separatedBy: "&").first : nil
+            guard (headerTok ?? queryTok) == token else {
+                return HTTPResponse(status: 401, headers: ["Content-Type": "application/json"],
+                                    body: Data("{\"error\":\"unauthorized\"}".utf8))
+            }
+            if request.method == "GET", path == "/snapshot" {
+                let data = await MainActor.run { () -> Data in
+                    let snap = EdgeSnapshot.build(store: store, state: state)
+                    let enc = JSONEncoder()
+                    return (try? enc.encode(snap)) ?? Data("{}".utf8)
+                }
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            }
+            return .notFound()
+        }
+        do {
+            try server.start()
+            NSLog("EdgePanel LAN bridge → http://\(Self.lanIP()):\(port)/snapshot  (token: \(token))")
+        } catch {
+            NSLog("EdgePanel LAN bridge failed on :\(port): \(error.localizedDescription)")
+        }
+        self.lanServer = server
+    }
+
+    /// Best-effort primary LAN IPv4 (en0/en1), for the pairing log.
+    private static func lanIP() -> String {
+        var result = "127.0.0.1"
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return result }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let cur = ptr {
+            let flags = Int32(cur.pointee.ifa_flags)
+            if let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+               (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING) {
+                let name = String(cString: cur.pointee.ifa_name)
+                if name == "en0" || name == "en1" {
+                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        result = String(cString: host)
+                    }
+                }
+            }
+            ptr = cur.pointee.ifa_next
+        }
+        freeifaddrs(ifaddr)
+        return result
     }
 
     // MARK: - Menu bar (its only job: toggle the panel)

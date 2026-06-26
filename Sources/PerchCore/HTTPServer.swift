@@ -12,6 +12,7 @@ public final class HTTPServer: @unchecked Sendable {
 
     private let port: NWEndpoint.Port
     private let handler: Handler
+    private let loopbackOnly: Bool
     private let queue = DispatchQueue(label: "perch.http.server")
     private var listener: NWListener?
 
@@ -22,14 +23,18 @@ public final class HTTPServer: @unchecked Sendable {
     /// Fires on the server's internal queue.
     public var onState: (@Sendable (Bool) -> Void)?
 
-    public init(port: UInt16, handler: @escaping Handler) {
+    /// `loopbackOnly` (default) binds 127.0.0.1 only — for hooks. Pass `false`
+    /// to also accept LAN connections (e.g. an iPhone companion); callers MUST
+    /// then authenticate requests themselves (a token).
+    public init(port: UInt16, loopbackOnly: Bool = true, handler: @escaping Handler) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8787
+        self.loopbackOnly = loopbackOnly
         self.handler = handler
     }
 
     public func start() throws {
         let params = NWParameters.tcp
-        params.requiredInterfaceType = .loopback   // refuse non-loopback interfaces
+        if loopbackOnly { params.requiredInterfaceType = .loopback }   // refuse non-loopback interfaces
         params.allowLocalEndpointReuse = true
         if let tcp = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
             tcp.version = .v4
@@ -65,9 +70,9 @@ public final class HTTPServer: @unchecked Sendable {
 
     private func accept(_ conn: NWConnection) {
         let loopback = Self.isLoopback(conn.endpoint)
-        // Defense in depth: even if the interface check is bypassed, drop
-        // anything whose remote endpoint isn't loopback.
-        guard loopback else {
+        // Defense in depth: in loopback-only mode drop any non-loopback peer even
+        // if the interface check was bypassed. In LAN mode the handler authenticates.
+        guard loopback || !loopbackOnly else {
             conn.cancel()
             return
         }
