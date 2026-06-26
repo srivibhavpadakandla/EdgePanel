@@ -229,9 +229,11 @@ final class EdgePanelState: ObservableObject {
             onApprovalChange?(true)
             pushQuestionAlert(request)
             idleTimer?.invalidate(); idleTimer = nil
+            // Clean up well AFTER the hook's own timeout (120s) so the desktop UI
+            // takes over via that timeout — we never send a bogus empty answer.
             Task { [weak self, qid] in
-                try? await Task.sleep(nanoseconds: 90 * 1_000_000_000)
-                self?.resolveQuestion(qid, [:])     // unanswered → fall back to the desktop UI
+                try? await Task.sleep(nanoseconds: 150 * 1_000_000_000)
+                self?.resolveQuestion(qid, [:])
             }
         }
     }
@@ -300,6 +302,33 @@ final class EdgePanelState: ObservableObject {
         case "device":   devicePushToken = token
         default:         break
         }
+    }
+
+    private var lastPushedWorkingIds: Set<String> = []
+
+    /// Push the aggregate Live Activity state to the phone via APNs whenever the set
+    /// of working sessions changes — so the Dynamic Island ends (and reflects which
+    /// chats are running) seamlessly even when the app is suspended or fully closed.
+    /// The timer/tokens self-tick on the device, so we only push on membership change.
+    func pushAggregate(working: [LiveSession]) {
+        guard APNsPusher.shared.enabled, let token = activityPushTokens["edgepanel"] else { return }
+        let ids = Set(working.map { $0.id })
+        guard ids != lastPushedWorkingIds else { return }
+        lastPushedWorkingIds = ids
+        if working.isEmpty {
+            APNsPusher.shared.pushActivity(token: token, event: "end",
+                contentState: ["sessions": [[String: Any]](), "done": true, "doneDetail": "finished"])
+            return
+        }
+        let freezeAt = Date().addingTimeInterval(90).timeIntervalSince1970
+        let sessions: [[String: Any]] = working.map { sn in
+            ["id": sn.id, "project": sn.project,
+             "prompt": sn.promptText.map { String($0.prefix(80)) } ?? "working…",
+             "startEpoch": sn.promptAt?.timeIntervalSince1970 ?? Date().timeIntervalSince1970,
+             "tokens": sn.turnTokens, "freezeAt": freezeAt]
+        }
+        APNsPusher.shared.pushActivity(token: token, event: "update",
+            contentState: ["sessions": sessions, "done": false])
     }
 
     /// Alert the phone that a permission is waiting — so you can Allow/Deny even with

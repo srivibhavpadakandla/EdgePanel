@@ -25,6 +25,9 @@ final class UsageStore: ObservableObject {
     // Fires when a working session finishes (was generating, now done) — used to
     // push a "done" Live Activity update + notification to the phone (Tier 2).
     var onSessionEnded: ((LiveSession) -> Void)?
+    /// Fires whenever the set of working sessions changes — drives the APNs push that
+    /// ends/updates the phone's Live Activity seamlessly.
+    var onWorkingChanged: (([LiveSession]) -> Void)?
     private var prevWorking: [String: LiveSession] = [:]
 
     // Recent Claude Code chats (sessions), newest first.
@@ -94,6 +97,7 @@ final class UsageStore: ObservableObject {
         let working = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
         for (id, prev) in prevWorking where working[id] == nil { onSessionEnded?(prev) }
         prevWorking = working
+        onWorkingChanged?(Array(working.values))
     }
 
     /// Summarize long, title-less chat names (the claude CLI), keyed by chat id.

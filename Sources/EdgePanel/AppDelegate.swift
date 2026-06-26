@@ -29,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Tier 2: when a session finishes, push a "done" update to the phone.
         store.onSessionEnded = { [weak self] s in self?.state.pushSessionEnded(s) }
+        // Seamless Dynamic Island: push the aggregate state (end/update) when the set
+        // of working chats changes, so the Island stops the instant a turn finishes.
+        store.onWorkingChanged = { [weak self] w in self?.state.pushAggregate(working: w) }
 
         startServer()
         startLANServer()

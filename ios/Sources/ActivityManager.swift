@@ -85,7 +85,6 @@ final class ActivityManager {
 
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
-            KeepAlive.shared.stop()             // nothing running → let the app suspend
             guard let act = aggregate else { return }
             let detail = finished.count == 1 ? doneDetail(finished[0])
                        : finished.isEmpty   ? "finished"
@@ -101,18 +100,28 @@ final class ActivityManager {
             return
         }
 
-        // No staleDate: the countup timer self-ticks without the app awake, so the
-        // Island stays accurate while a prompt runs even backgrounded. "Done" comes
-        // via ntfy + reconcile-on-open — we don't fake an "offline" state that made
-        // the Island look broken during normal use.
-        KeepAlive.shared.start()               // stay awake in the background so we see the finish
+        // Requested with a push token: the Mac pushes "end" (and membership updates)
+        // the instant a turn finishes, so the Island stops seamlessly even fully
+        // closed — no app wake-up needed. The bounded timer still self-ticks live.
         let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
         let content = ActivityContent(state: state, staleDate: nil)
         if let act = aggregate {
             Task { await act.update(content) }
         } else if let act = try? Activity.request(
-            attributes: WorkingAttributes(id: "edgepanel"), content: content) {
+            attributes: WorkingAttributes(id: "edgepanel"), content: content, pushType: .token) {
             aggregate = act
+            observePushToken(act)
+        }
+    }
+
+    /// Forward the Live Activity's APNs push token to the Mac, so it can end/update
+    /// the Island via push when the app is suspended or fully closed (Tier 2).
+    private func observePushToken(_ act: Activity<WorkingAttributes>) {
+        Task {
+            for await tokenData in act.pushTokenUpdates {
+                let hex = tokenData.map { String(format: "%02x", $0) }.joined()
+                onPushToken?("activity", "edgepanel", hex)
+            }
         }
     }
 
