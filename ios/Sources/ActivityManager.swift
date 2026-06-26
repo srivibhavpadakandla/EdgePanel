@@ -82,12 +82,14 @@ final class ActivityManager {
             return
         }
 
+        // staleDate: if the app stops updating (backgrounded), iOS flags the activity
+        // stale ~60s later and the widget freezes the timer instead of ticking forever.
         let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
+        let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(60))
         if let act = aggregate {
-            Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
+            Task { await act.update(content) }
         } else if let act = try? Activity.request(
-            attributes: WorkingAttributes(id: "edgepanel"),
-            content: ActivityContent(state: state, staleDate: nil)) {
+            attributes: WorkingAttributes(id: "edgepanel"), content: content) {
             aggregate = act
         }
     }

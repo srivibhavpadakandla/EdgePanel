@@ -1,4 +1,8 @@
 import SwiftUI
+import BackgroundTasks
+import UIKit
+
+let bgRefreshID = "com.srivibhav.edgepanel.refresh"
 
 @main
 struct EdgePanelMobileApp: App {
@@ -18,7 +22,27 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Best-effort background reconcile: lets a finished prompt flip the Live
+        // Activity to done + fire its notification even while the app is backgrounded.
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: bgRefreshID, using: nil) { task in
+            self.handleAppRefresh(task as! BGAppRefreshTask)
+        }
         return true
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) { scheduleAppRefresh() }
+
+    private func scheduleAppRefresh() {
+        let req = BGAppRefreshTaskRequest(identifier: bgRefreshID)
+        req.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        try? BGTaskScheduler.shared.submit(req)
+    }
+
+    private func handleAppRefresh(_ task: BGAppRefreshTask) {
+        scheduleAppRefresh()   // chain the next one
+        let work = Task { @MainActor in await EdgeClient.shared.poll() }
+        task.expirationHandler = { work.cancel() }
+        Task { _ = await work.value; task.setTaskCompleted(success: true) }
     }
 
     func application(_ application: UIApplication,
@@ -49,6 +73,7 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
 
 struct RootView: View {
     @EnvironmentObject var client: EdgeClient
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showPair = false
     var body: some View {
         ZStack {
@@ -60,6 +85,11 @@ struct RootView: View {
         .onAppear {
             ActivityManager.shared.requestNotifications()
             if client.token.isEmpty { showPair = true } else { client.start() }
+        }
+        // Reconcile the moment the app returns to the foreground, so a stale "still
+        // counting" Live Activity self-heals instantly on open.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, !client.token.isEmpty { Task { await client.poll() } }
         }
     }
 
