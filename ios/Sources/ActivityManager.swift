@@ -85,6 +85,7 @@ final class ActivityManager {
 
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
+            KeepAlive.shared.stop()             // nothing running → let the app suspend
             guard let act = aggregate else { return }
             let detail = finished.count == 1 ? doneDetail(finished[0])
                        : finished.isEmpty   ? "finished"
@@ -104,6 +105,7 @@ final class ActivityManager {
         // Island stays accurate while a prompt runs even backgrounded. "Done" comes
         // via ntfy + reconcile-on-open — we don't fake an "offline" state that made
         // the Island look broken during normal use.
+        KeepAlive.shared.start()               // stay awake in the background so we see the finish
         let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
         let content = ActivityContent(state: state, staleDate: nil)
         if let act = aggregate {
