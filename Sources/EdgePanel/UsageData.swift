@@ -390,6 +390,25 @@ enum UsageLoader {
     }
 }
 
+/// A recent Claude Code chat (one session/transcript), for the "recent chats" list.
+struct RecentChat: Identifiable {
+    let id: String            // session uuid
+    let project: String       // cwd basename
+    let cwd: String?
+    let title: String?        // Claude Code's own ai-title (already human-readable)
+    let firstPrompt: String?  // fallback name source
+    let lastActive: Date
+    /// A clean name: the ai-title, else a short form of the first prompt.
+    func name(summaries: [String: String]) -> String {
+        if let t = title, !t.isEmpty { return t }
+        guard let p = firstPrompt, !p.isEmpty else { return "Chat" }
+        if p.count <= 60 { return p }
+        return summaries[id] ?? (String(p.prefix(56)) + "…")
+    }
+    /// True when we need the claude CLI to shorten a long, title-less prompt.
+    var needsSummary: Bool { (title?.isEmpty ?? true) && (firstPrompt?.count ?? 0) > 60 }
+}
+
 /// One tool call, for the activity feed. Parsed from a transcript `tool_use`.
 struct ToolEvent: Identifiable, Equatable {
     let id = UUID()
@@ -576,6 +595,46 @@ extension UsageLoader {
     static func isTransientProject(_ fileURL: URL) -> Bool {
         let proj = fileURL.deletingLastPathComponent().lastPathComponent
         return proj.contains("var-folders") || proj.contains("private-tmp") || proj.contains("-tmp-")
+    }
+
+    /// A recent Claude Code chat (session), for the "recent chats" list.
+    static func recentChats(within: TimeInterval = 86400, limit: Int = 6) -> [RecentChat] {
+        let base = projectsBase()
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        let now = Date()
+        var recent: [(url: URL, date: Date)] = []
+        while let u = en.nextObject() as? URL {
+            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(mod) <= within { recent.append((u, mod)) }
+        }
+        recent.sort { $0.date > $1.date }
+
+        var out: [RecentChat] = []
+        for (u, mod) in recent {
+            if out.count >= limit { break }
+            // ai-title + first prompt + cwd live near the start; read a prefix only.
+            guard let fh = try? FileHandle(forReadingFrom: u) else { continue }
+            let data = (try? fh.read(upToCount: 262_144)) ?? Data()
+            try? fh.close()
+            guard let text = String(data: data, encoding: .utf8) else { continue }
+
+            var title: String?, cwd: String?, firstPrompt: String?
+            for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any] else { continue }
+                if title == nil, (o["type"] as? String) == "ai-title" {
+                    title = (o["aiTitle"] as? String) ?? (o["title"] as? String)
+                }
+                if cwd == nil, let c = o["cwd"] as? String, !c.isEmpty { cwd = c }
+                if firstPrompt == nil, let p = userPromptText(o) { firstPrompt = p }
+                if title != nil && cwd != nil && firstPrompt != nil { break }
+            }
+            if title == nil && firstPrompt == nil { continue }   // metadata-only sidecar
+            let project = cwd.map { ($0 as NSString).lastPathComponent } ?? "session"
+            out.append(RecentChat(id: u.deletingPathExtension().lastPathComponent, project: project,
+                                  cwd: cwd, title: title, firstPrompt: firstPrompt, lastActive: mod))
+        }
+        return out
     }
 
     /// The genuine human-typed text of a user message, or nil if this isn't one

@@ -22,8 +22,8 @@ final class UsageStore: ObservableObject {
 
     // Live "which chats are working" list.
     @Published var sessions: [LiveSession] = []
-    // Real recent tool calls of the active session (from the transcript).
-    @Published var recentTools: [ToolEvent] = []
+    // Recent Claude Code chats (sessions), newest first.
+    @Published var recentChats: [RecentChat] = []
     // sessionID → short summary of its (long) prompt, from the claude CLI.
     @Published var promptSummaries: [String: String] = [:]
 
@@ -73,11 +73,21 @@ final class UsageStore: ObservableObject {
     func refreshSessions() {
         sessionQ.async {
             let sessions = UsageLoader.activeSessions()
-            let activity = UsageLoader.recentActivity()
             DispatchQueue.main.async {
                 self.sessions = sessions
-                self.recentTools = activity
                 self.updateSummaries(sessions)
+            }
+        }
+    }
+
+    /// Summarize long, title-less chat names (the claude CLI), keyed by chat id.
+    private func updateChatSummaries(_ chats: [RecentChat]) {
+        for c in chats where c.needsSummary {
+            guard let p = c.firstPrompt else { continue }
+            if let cached = PromptSummarizer.shared.shortLabel(for: p, onReady: { [weak self] summary in
+                self?.promptSummaries[c.id] = summary
+            }) {
+                promptSummaries[c.id] = cached
             }
         }
     }
@@ -102,13 +112,14 @@ final class UsageStore: ObservableObject {
         q.async {
             let s = UsageLoader.computeSummary()
             let sessions = UsageLoader.activeSessions()
-            let activity = UsageLoader.recentActivity()
+            let chats = UsageLoader.recentChats()
             DispatchQueue.main.async {
                 self.summary = s
                 self.loading = false
                 self.sessions = sessions
-                self.recentTools = activity
+                self.recentChats = chats
                 self.updateSummaries(sessions)
+                self.updateChatSummaries(chats)
             }
         }
     }

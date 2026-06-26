@@ -9,7 +9,7 @@ struct EdgeSnapshot: Codable {
     var plan: PlanInfo?
     var spend: Spend
     var working: [Working]
-    var activity: [Activity]
+    var chats: [Chat]
     var calendar: [CalDay]
 
     struct PlanInfo: Codable {
@@ -22,8 +22,6 @@ struct EdgeSnapshot: Codable {
     }
     struct Spend: Codable {
         var fiveHourUSD: Double
-        var perModel: [ModelSpend]
-        struct ModelSpend: Codable { var name: String; var costUSD: Double; var tokens: Int }
     }
     struct Working: Codable {
         var id: String
@@ -34,11 +32,12 @@ struct EdgeSnapshot: Codable {
         var promptAtEpoch: Double?
         var turnTokens: Int
     }
-    struct Activity: Codable {
-        var tool: String
-        var summary: String
-        var filePath: String?
-        var atEpoch: Double
+    struct Chat: Codable {
+        var id: String
+        var name: String
+        var project: String
+        var cwd: String?
+        var lastActiveEpoch: Double
     }
     struct CalDay: Codable { var day: Int; var tokens: Int }
 
@@ -63,22 +62,20 @@ struct EdgeSnapshot: Codable {
             }
             return s.block?.cost ?? 0
         }()
-        let models = (!s.windowModels.isEmpty ? s.windowModels : s.models).prefix(4).map {
-            Spend.ModelSpend(name: $0.name, costUSD: $0.cost, tokens: $0.tokens)
-        }
 
         let working = store.sessions.filter { $0.isWorking() }.map { sn in
             Working(id: sn.id, project: sn.project, model: sn.model.map(prettyModel),
                     prompt: sn.promptText, promptSummary: store.promptSummaries[sn.id],
                     promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens)
         }
-        let activity = store.recentTools.map {
-            Activity(tool: $0.tool, summary: $0.summary, filePath: $0.filePath, atEpoch: $0.date.timeIntervalSince1970)
+        let chats = store.recentChats.map { c in
+            Chat(id: c.id, name: c.name(summaries: store.promptSummaries), project: c.project,
+                 cwd: c.cwd, lastActiveEpoch: c.lastActive.timeIntervalSince1970)
         }
         let calendar = s.monthDayTokens.map { CalDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
 
         return EdgeSnapshot(generatedAt: now.timeIntervalSince1970, plan: plan,
-                            spend: Spend(fiveHourUSD: windowSpend, perModel: Array(models)),
-                            working: working, activity: activity, calendar: calendar)
+                            spend: Spend(fiveHourUSD: windowSpend),
+                            working: working, chats: chats, calendar: calendar)
     }
 }

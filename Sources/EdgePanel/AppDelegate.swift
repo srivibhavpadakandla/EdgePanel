@@ -112,6 +112,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             }
+            // Resume a chat on the Mac, triggered from the phone. Body: {id, cwd}.
+            if request.method == "POST", path == "/open" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let id = obj["id"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let cwd = obj["cwd"] as? String
+                await MainActor.run { state.openChat(cwd: cwd, id: id) }
+                return .ok("opening")
+            }
             return .notFound()
         }
         do {

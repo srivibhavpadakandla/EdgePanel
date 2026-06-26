@@ -169,35 +169,38 @@ struct MonthCalendar: View {
 
 // MARK: - New cards (the cheap wins)
 
-/// Cheap win #3 — per-model split of the 5-hour window spend.
-struct ModelSplit: View {
-    let models: [(name: String, cost: Double, tokens: Int)]
+/// Recent chats: your latest Claude Code sessions, named by their ai-title (or a
+/// summarized first prompt). Click a row to resume that chat in Terminal.
+struct RecentChatsCard: View {
+    let chats: [RecentChat]
+    let summaries: [String: String]
     let theme: Theme
-    private func color(_ name: String) -> Color {
-        name.contains("Opus") ? theme.accent2 : name.contains("Haiku") ? theme.green : theme.amber
-    }
+    let onOpen: (RecentChat) -> Void
+
     var body: some View {
-        let rows = Array(models.prefix(3))
-        let maxCost = max(rows.map { $0.cost }.max() ?? 0, 0.0001)
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("5H SPEND BY MODEL").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
-            if rows.isEmpty {
-                Text("no activity this window").font(.claude(11)).foregroundColor(theme.subtext)
+        VStack(alignment: .leading, spacing: 9) {
+            Text("RECENT CHATS").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
+            if chats.isEmpty {
+                Text("no recent chats").font(.claude(11)).foregroundColor(theme.subtext)
             } else {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, m in
-                    HStack(spacing: 8) {
-                        Circle().fill(color(m.name)).frame(width: 7, height: 7)
-                        Text(m.name).font(.claude(12, .medium)).foregroundColor(theme.text).frame(width: 86, alignment: .leading)
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(theme.track).frame(height: 6)
-                                Capsule().fill(color(m.name).opacity(0.9))
-                                    .frame(width: max(6, geo.size.width * CGFloat(m.cost / maxCost)), height: 6)
+                ForEach(chats) { c in
+                    Button { onOpen(c) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "bubble.left.and.text.bubble.right")
+                                .font(.system(size: 12)).foregroundColor(theme.accent2).frame(width: 18)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(c.name(summaries: summaries)).font(.claude(13, .medium))
+                                    .foregroundColor(theme.text).lineLimit(1)
+                                Text(c.project).font(.claude(10)).foregroundColor(theme.subtext).lineLimit(1)
                             }
-                        }.frame(height: 6)
-                        Text(fmtCost(m.cost)).font(.claude(11)).foregroundColor(theme.subtext)
-                            .frame(width: 52, alignment: .trailing)
+                            Spacer(minLength: 6)
+                            Text(fmtAgo(c.lastActive)).font(.claude(10)).foregroundColor(theme.subtext)
+                            Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundColor(theme.subtext)
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .help("Resume “\(c.name(summaries: summaries))” in Terminal")
                 }
             }
         }
@@ -354,51 +357,6 @@ struct PermissionCard: View {
     }
 }
 
-/// Activity feed (Phase 3): the last few tool calls; click a file row to open it.
-struct ActivityFeed: View {
-    let tools: [ToolEvent]
-    let theme: Theme
-    let onOpen: (String) -> Void
-
-    private func icon(_ tool: String) -> String {
-        switch tool {
-        case "Edit", "MultiEdit", "Write", "NotebookEdit": return "pencil"
-        case "Read":   return "doc.text"
-        case "Bash":   return "terminal"
-        case "Grep", "Glob", "Search": return "magnifyingglass"
-        case "WebFetch", "WebSearch":  return "globe"
-        default:       return "circle.fill"
-        }
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("RECENT ACTIVITY").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
-            if tools.isEmpty {
-                Text("waiting for tool activity…").font(.claude(11)).foregroundColor(theme.subtext)
-            } else {
-                ForEach(tools) { tool in
-                    Button { if let f = tool.filePath { onOpen(f) } } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: icon(tool.tool)).font(.system(size: 11))
-                                .foregroundColor(theme.subtext).frame(width: 14)
-                            Text(tool.summary.isEmpty ? tool.tool : tool.summary)
-                                .font(.claude(12)).foregroundColor(theme.text).lineLimit(1).truncationMode(.middle)
-                            Spacer(minLength: 6)
-                            Text(fmtAgo(tool.date)).font(.claude(10)).foregroundColor(theme.subtext)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(tool.filePath != nil ? "Open \(tool.summary)" : tool.tool)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
-    }
-}
 
 // MARK: - Root
 
@@ -483,7 +441,6 @@ struct EdgeUsageView: View {
             }
             return s.block?.cost ?? 0
         }()
-        let windowModels = !s.windowModels.isEmpty ? s.windowModels : s.models
 
         return VStack(spacing: 14) {
             if let p = state.pending {
@@ -507,9 +464,8 @@ struct EdgeUsageView: View {
                 SpendCard(amount: windowSpend, theme: t)
             }
 
-            ModelSplit(models: windowModels, theme: t)
-
-            ActivityFeed(tools: store.recentTools, theme: t, onOpen: { state.openFile($0) })
+            RecentChatsCard(chats: store.recentChats, summaries: store.promptSummaries, theme: t,
+                            onOpen: { state.openChat(cwd: $0.cwd, id: $0.id) })
 
             footnote(t)
         }

@@ -2,3 +2,7 @@
 .swiftpm/
 *.xcodeproj
 .DS_Store
+
+# iOS
+ios/*.xcodeproj/
+ios/build/
