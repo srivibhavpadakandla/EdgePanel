@@ -242,22 +242,28 @@ struct SessionsCard: View {
                         .font(.claude(11)).foregroundColor(theme.subtext)
                 } else {
                     ForEach(working.prefix(4)) { s in
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 9) {
                                 Circle().fill(theme.green).frame(width: 7, height: 7)
                                 Text(s.project).font(.claude(13, .semibold)).foregroundColor(theme.text).lineLimit(1)
                                 Spacer(minLength: 6)
+                                Image(systemName: "clock").font(.system(size: 9)).foregroundColor(theme.green)
                                 Text(s.promptAt == nil ? "—" : fmtElapsed(s.elapsed(asOf: now)))
-                                    .font(.claude(12, .medium)).foregroundColor(theme.green).monospacedDigit()
+                                    .font(.claude(13, .semibold)).foregroundColor(theme.green).monospacedDigit()
                             }
-                            // The prompt you gave this chat (summarized if long).
-                            Text(promptLine(s))
-                                .font(.claude(12)).italic().foregroundColor(theme.text.opacity(0.82))
+                            // The prompt you gave this chat (summarized if long) — labeled
+                            // + quoted so it's clearly your prompt, not the stats.
+                            (Text("PROMPT  ").font(.claude(9, .semibold)).tracking(0.5).foregroundColor(theme.subtext)
+                                + Text("\u{201C}\(promptLine(s))\u{201D}").font(.claude(12)).italic().foregroundColor(theme.text.opacity(0.88)))
                                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                            Text("\(s.model.map(prettyModel) ?? "Claude") · \(fmtTokens(s.turnTokens)) tokens")
-                                .font(.claude(10)).foregroundColor(theme.subtext)
+                            HStack(spacing: 5) {
+                                Text(fmtTokens(s.turnTokens)).font(.claude(13, .semibold)).foregroundColor(theme.text)
+                                Text("tokens this turn").font(.claude(10)).foregroundColor(theme.subtext)
+                                Text("·").font(.claude(10)).foregroundColor(theme.subtext)
+                                Text(s.model.map(prettyModel) ?? "Claude").font(.claude(10)).foregroundColor(theme.subtext)
+                            }
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 3)
                     }
                 }
             }

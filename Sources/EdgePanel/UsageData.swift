@@ -443,23 +443,16 @@ extension UsageLoader {
             let objs = text.split(separator: "\n", omittingEmptySubsequences: true)
                 .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
 
-            // The current turn = everything after the last real user prompt.
+            // The current turn = everything after your last *typed* prompt.
+            // userPromptText() skips tool_result continuations and Claude Code's
+            // injected context (system reminders, slash-command wrappers, caveats).
             var boundary = -1
-            for (i, o) in objs.enumerated() where isRealUserTurn(o) { boundary = i }
-            var promptAt: Date?
             var promptText: String?
-            if boundary >= 0 {
-                if let ts = objs[boundary]["timestamp"] as? String { promptAt = parseDate(ts) }
-                if let m = objs[boundary]["message"] as? [String: Any] {
-                    if let s = m["content"] as? String { promptText = s }
-                    else if let blocks = m["content"] as? [[String: Any]] {
-                        promptText = blocks.compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
-                            .joined(separator: " ")
-                    }
-                    promptText = promptText?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if promptText?.isEmpty == true { promptText = nil }
-                }
+            for (i, o) in objs.enumerated() {
+                if let t = userPromptText(o) { boundary = i; promptText = t }
             }
+            var promptAt: Date?
+            if boundary >= 0, let ts = objs[boundary]["timestamp"] as? String { promptAt = parseDate(ts) }
 
             // Tokens this turn: dedup assistant calls by request id (keep the final
             // non-streaming one), sum billable (input + output + cache writes).
@@ -479,14 +472,19 @@ extension UsageLoader {
             }
             let turnTokens = byReq.values.reduce(0) { $0 + $1.inT + $1.outT + $1.cacheW }
 
-            // The turn is finished only when the last record is an assistant
-            // message that ended (end_turn / stop_sequence / max_tokens). A
-            // trailing user prompt, tool_result, or a tool_use pause = still going.
-            var turnComplete = false
-            if let last = objs.last, (last["type"] as? String) == "assistant",
-               let m = last["message"] as? [String: Any], let sr = m["stop_reason"] as? String {
-                turnComplete = (sr == "end_turn" || sr == "stop_sequence" || sr == "max_tokens")
+            // The turn is finished when a completed assistant message (stop_reason
+            // end_turn / stop_sequence / max_tokens) exists AFTER your last prompt.
+            // Looking only at user/assistant messages ignores trailing metadata
+            // records (ai-title, mode, last-prompt) that would otherwise make an
+            // idle, already-answered session look like it's still working.
+            var lastTerminalAssistant = -1
+            for (i, o) in objs.enumerated() {
+                guard (o["type"] as? String) == "assistant",
+                      let m = o["message"] as? [String: Any],
+                      let sr = m["stop_reason"] as? String else { continue }
+                if sr == "end_turn" || sr == "stop_sequence" || sr == "max_tokens" { lastTerminalAssistant = i }
             }
+            let turnComplete = boundary < 0 || lastTerminalAssistant > boundary
 
             var project = "session"
             var model: String?
@@ -578,11 +576,25 @@ extension UsageLoader {
         return proj.contains("var-folders") || proj.contains("private-tmp") || proj.contains("-tmp-")
     }
 
-    private static func isRealUserTurn(_ o: [String: Any]) -> Bool {
-        guard (o["type"] as? String) == "user", let m = o["message"] as? [String: Any] else { return false }
-        if m["content"] is String { return true }
-        if let blocks = m["content"] as? [[String: Any]] { return blocks.contains { ($0["type"] as? String) == "text" } }
-        return false
+    /// The genuine human-typed text of a user message, or nil if this isn't one
+    /// (tool_result continuation, or Claude Code injected context).
+    private static func userPromptText(_ o: [String: Any]) -> String? {
+        guard (o["type"] as? String) == "user", let m = o["message"] as? [String: Any] else { return nil }
+        var text: String?
+        if let s = m["content"] as? String { text = s }
+        else if let blocks = m["content"] as? [[String: Any]] {
+            let texts = blocks.compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+            if texts.isEmpty { return nil }   // tool_result-only = mid-turn continuation
+            text = texts.joined(separator: " ")
+        }
+        guard var t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        // Drop messages that are purely injected context.
+        let injected = ["<system-reminder", "<command-", "<local-command", "<user-memory",
+                        "Caveat:", "[Request interrupted", "This session is being continued"]
+        if injected.contains(where: { t.hasPrefix($0) }) { return nil }
+        // Strip a system-reminder appended to an otherwise-real prompt.
+        if let r = t.range(of: "<system-reminder") { t = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines) }
+        return t.isEmpty ? nil : t
     }
     private static func intVal(_ a: Any?) -> Int {
         if let i = a as? Int { return i }
