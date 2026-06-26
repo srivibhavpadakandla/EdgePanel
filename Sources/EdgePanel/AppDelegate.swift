@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startServer()
         startLANServer()
         setupDebugToggle()
+        NSLog("EdgePanel APNs (Tier 2): \(APNsPusher.shared.enabled ? "ENABLED — pushes when the app is closed" : "disabled (no ~/.edgepanel/apns.json)")")
         if ProcessInfo.processInfo.environment["EDGEPANEL_SHOW_PAIRING"] == "1" { showPairing() }
         NSLog("EdgePanel launched — Phase 1 (live Usage + hook pipe). Right-edge to reveal · kill -USR1 \(ProcessInfo.processInfo.processIdentifier)")
     }
