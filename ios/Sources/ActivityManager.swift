@@ -109,10 +109,17 @@ final class ActivityManager {
         let content = ActivityContent(state: state, staleDate: nil)
         if let act = aggregate {
             Task { await act.update(content) }
-        } else if let act = try? Activity.request(
-            attributes: WorkingAttributes(id: "edgepanel"), content: content, pushType: .token) {
-            aggregate = act
-            observePushToken(act)
+        } else {
+            // Prefer a push-enabled activity (so the Mac can end it via APNs). Fall
+            // back to a LOCAL activity if push isn't provisioned — otherwise the
+            // Island wouldn't appear at all on a build without a valid push profile.
+            let attrs = WorkingAttributes(id: "edgepanel")
+            if let act = try? Activity.request(attributes: attrs, content: content, pushType: .token) {
+                aggregate = act
+                observePushToken(act)
+            } else if let act = try? Activity.request(attributes: attrs, content: content) {
+                aggregate = act
+            }
         }
     }
 
