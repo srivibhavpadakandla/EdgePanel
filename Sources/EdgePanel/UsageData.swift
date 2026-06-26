@@ -398,10 +398,10 @@ struct RecentChat: Identifiable {
     let title: String?        // Claude Code's own ai-title (already human-readable)
     let firstPrompt: String?  // fallback name source
     let lastActive: Date
-    /// A clean name: the ai-title, else a short form of the first prompt.
+    /// A clean name: the ai-title, else a short form of the first prompt (never raw JSON).
     func name(summaries: [String: String]) -> String {
         if let t = title, !t.isEmpty { return t }
-        guard let p = firstPrompt, !p.isEmpty else { return "Chat" }
+        guard let p = firstPrompt, !p.isEmpty, !p.hasPrefix("["), !p.hasPrefix("{") else { return "Chat" }
         if p.count <= 60 { return p }
         return summaries[id] ?? (String(p.prefix(56)) + "…")
     }
@@ -621,28 +621,42 @@ extension UsageLoader {
         recent.sort { $0.date > $1.date }
 
         var out: [RecentChat] = []
+        var seenNames = Set<String>()
         for (u, mod) in recent {
             if out.count >= limit { break }
             // ai-title + first prompt + cwd live near the start; read a prefix only.
             guard let fh = try? FileHandle(forReadingFrom: u) else { continue }
-            let data = (try? fh.read(upToCount: 262_144)) ?? Data()
+            let data = (try? fh.read(upToCount: 524_288)) ?? Data()
             try? fh.close()
-            guard let text = String(data: data, encoding: .utf8) else { continue }
+            let text = String(decoding: data, as: UTF8.self)
 
-            var title: String?, cwd: String?, firstPrompt: String?
+            var title: String?, cwd: String?, firstPrompt: String?, isInteractive = false
             for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
                 guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any] else { continue }
+                // Only YOUR interactive chats: real Claude Code UI/CLI sessions carry an
+                // `entrypoint` (e.g. "claude-vscode"); subagent/workflow/headless
+                // sessions (the "Verify…"/"Audit…"/"qa-ok" ones) don't, so this drops them.
+                if let e = o["entrypoint"] as? String, !e.isEmpty { isInteractive = true }
                 if title == nil, (o["type"] as? String) == "ai-title" {
                     title = (o["aiTitle"] as? String) ?? (o["title"] as? String)
                 }
                 if cwd == nil, let c = o["cwd"] as? String, !c.isEmpty { cwd = c }
-                if firstPrompt == nil, let p = userPromptText(o) { firstPrompt = p }
-                if title != nil && cwd != nil && firstPrompt != nil { break }
+                // Skip raw-JSON first messages (tool blobs) as a name source.
+                if firstPrompt == nil, let p = userPromptText(o), !p.hasPrefix("["), !p.hasPrefix("{") { firstPrompt = p }
+                if title != nil && cwd != nil && isInteractive { break }
             }
-            if title == nil && firstPrompt == nil { continue }   // metadata-only sidecar
-            let project = cwd.map { ($0 as NSString).lastPathComponent } ?? "session"
-            out.append(RecentChat(id: u.deletingPathExtension().lastPathComponent, project: project,
-                                  cwd: cwd, title: title, firstPrompt: firstPrompt, lastActive: mod))
+            let id = u.deletingPathExtension().lastPathComponent
+            // Only real, established interactive chats: they have an entrypoint AND a
+            // Claude-generated ai-title. Subagent ("agent-*"), workflow, and headless
+            // sessions lack the title (or use the agent- naming), so they're dropped.
+            guard isInteractive, let realTitle = title, !realTitle.isEmpty, !id.hasPrefix("agent-") else { continue }
+            let project = cwd.map { ($0 as NSString).lastPathComponent } ?? "chat"
+            let chat = RecentChat(id: id, project: project, cwd: cwd,
+                                  title: realTitle, firstPrompt: firstPrompt, lastActive: mod)
+            let key = realTitle.lowercased()
+            if seenNames.contains(key) { continue }                    // dedupe
+            seenNames.insert(key)
+            out.append(chat)
         }
         return out
     }
