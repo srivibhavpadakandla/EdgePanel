@@ -302,6 +302,7 @@ final class EdgePanelState: ObservableObject {
         case "device":   devicePushToken = token
         default:         break
         }
+        NSLog("EdgePanel push token received: kind=\(kind) sid=\(sessionId ?? "-") token=\(token.prefix(12))…")
     }
 
     private var lastPushedWorkingIds: Set<String> = []

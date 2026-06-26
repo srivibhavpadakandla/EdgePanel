@@ -78,9 +78,13 @@ final class APNsPusher: @unchecked Sendable {
         req.setValue(topic, forHTTPHeaderField: "apns-topic")
         req.setValue(pushType, forHTTPHeaderField: "apns-push-type")
         req.setValue("10", forHTTPHeaderField: "apns-priority")
-        URLSession.shared.dataTask(with: req) { _, resp, _ in
-            if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 {
-                NSLog("APNs push failed: HTTP \(code)")
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            if code == 200 {
+                NSLog("APNs \(pushType) push OK")
+            } else {
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? err?.localizedDescription ?? ""
+                NSLog("APNs \(pushType) push FAILED: HTTP \(code) \(body)")   // e.g. BadDeviceToken / TopicDisallowed / ExpiredProviderToken
             }
         }.resume()
     }
