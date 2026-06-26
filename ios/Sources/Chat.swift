@@ -52,7 +52,7 @@ final class ChatStore: ObservableObject {
     /// — includes turns you ran on the PC and from the phone). Skipped while a reply
     /// is in flight so we don't clobber the optimistic bubbles.
     func refreshHistory(_ sessionId: String) {
-        guard !busy.contains(sessionId), let t = thread(sessionId) else { return }
+        guard let t = thread(sessionId) else { return }
         let cwd = t.cwd
         Task {
             let hist = await EdgeClient.shared.fetchHistory(sessionId: sessionId, cwd: cwd)
@@ -110,7 +110,7 @@ final class ChatStore: ObservableObject {
 // MARK: - Chat tab = saved history of the sessions you've worked in
 
 struct ChatListView: View {
-    @StateObject private var store = ChatStore.shared
+    @ObservedObject private var store = ChatStore.shared
     @EnvironmentObject var client: EdgeClient
     var body: some View {
         NavigationStack {
@@ -164,7 +164,7 @@ private struct ThreadRow: View {
 // MARK: - One thread (real session)
 
 struct ChatThreadView: View {
-    @StateObject private var store = ChatStore.shared
+    @ObservedObject private var store = ChatStore.shared
     let sessionId: String
     let project: String
     let cwd: String

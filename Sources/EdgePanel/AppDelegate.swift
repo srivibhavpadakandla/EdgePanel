@@ -51,7 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard request.remoteIsLoopback else {
                 return HTTPResponse(status: 403, headers: [:], body: Data("loopback only".utf8))
             }
-            switch (request.method, request.path) {
+            let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
+            switch (request.method, path) {
             case ("POST", "/event"):
                 let event = HookEvent(data: request.body, endpoint: request.path)
                 await MainActor.run { state.handle(event) }
@@ -121,8 +122,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if request.method == "GET", path == "/health" { return .ok("edgepanel-lan ok") }
             // Auth: X-EdgePanel-Token header, or ?token= query.
             let headerTok = request.headers["x-edgepanel-token"]
-            let queryTok = request.path.contains("token=")
-                ? request.path.components(separatedBy: "token=").last?.components(separatedBy: "&").first : nil
+            // Parse the FIRST token= from the query string only (not .last over the
+            // whole path, which let ?token=known&token=evil pick the attacker's value).
+            let queryTok: String? = {
+                guard let q = request.path.split(separator: "?", maxSplits: 1).dropFirst().first else { return nil }
+                for pair in q.split(separator: "&") {
+                    let kv = pair.split(separator: "=", maxSplits: 1)
+                    if kv.first == "token", kv.count == 2 { return String(kv[1]) }
+                }
+                return nil
+            }()
             guard (headerTok ?? queryTok) == token else {
                 return HTTPResponse(status: 401, headers: ["Content-Type": "application/json"],
                                     body: Data("{\"error\":\"unauthorized\"}".utf8))

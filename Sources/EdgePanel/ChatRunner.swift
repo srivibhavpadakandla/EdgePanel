@@ -49,33 +49,42 @@ final class ChatRunner: @unchecked Sendable {
             env["PATH"] = env["PATH"].map { "\($0):\(extra)" } ?? extra
             p.environment = env
 
-            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            // Capture stderr too — so a real failure (resume conflict, bad cwd, auth)
+            // surfaces a reason on the phone instead of a blank "doesn't send". Both
+            // pipes are drained concurrently to avoid a full-buffer deadlock.
+            let out = Pipe(); let err = Pipe()
+            p.standardOutput = out; p.standardError = err
             do { try p.run() } catch {
-                self.finish(jid, Job(status: "error", error: "couldn't launch claude")); return
+                self.finish(jid, Job(status: "error", error: "couldn't launch claude: \(error.localizedDescription)")); return
             }
-            let sem = DispatchSemaphore(value: 0)
-            var data = Data()
-            DispatchQueue.global(qos: .utility).async {
-                data = out.fileHandleForReading.readDataToEndOfFile(); sem.signal()
-            }
+            let sem = DispatchSemaphore(value: 0), errSem = DispatchSemaphore(value: 0)
+            var data = Data(), errData = Data()
+            DispatchQueue.global(qos: .utility).async { data = out.fileHandleForReading.readDataToEndOfFile(); sem.signal() }
+            DispatchQueue.global(qos: .utility).async { errData = err.fileHandleForReading.readDataToEndOfFile(); errSem.signal() }
             if sem.wait(timeout: .now() + maxRuntime) == .timedOut {
                 p.terminate()
-                self.finish(jid, Job(status: "error", error: "timed out after \(Int(maxRuntime))s")); return
+                self.finish(jid, Job(status: "error", error: "timed out after \(Int(maxRuntime))s — the session may be busy on your Mac")); return
             }
             p.waitUntilExit()
+            _ = errSem.wait(timeout: .now() + 2)
+            let stderr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 let result = (obj["result"] as? String) ?? ""
                 let sid = obj["session_id"] as? String
                 let isErr = (obj["is_error"] as? Bool) ?? false
+                let errMsg = !result.isEmpty ? result : (!stderr.isEmpty ? stderr : "claude returned an error")
                 self.finish(jid, Job(status: isErr ? "error" : "done",
                                      result: isErr ? nil : result, sessionId: sid,
-                                     error: isErr ? (result.isEmpty ? "claude returned an error" : result) : nil))
+                                     error: isErr ? errMsg : nil))
             } else {
                 let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                self.finish(jid, Job(status: raw.isEmpty ? "error" : "done",
-                                     result: raw.isEmpty ? nil : raw,
-                                     error: raw.isEmpty ? "no output from claude" : nil))
+                let code = p.terminationStatus
+                let ok = code == 0 && !raw.isEmpty
+                let detail = !stderr.isEmpty ? stderr : (raw.isEmpty ? "no output" : raw)
+                self.finish(jid, Job(status: ok ? "done" : "error",
+                                     result: ok ? raw : nil,
+                                     error: ok ? nil : "claude exited \(code): \(String(detail.prefix(300)))"))
             }
         }
         return jid

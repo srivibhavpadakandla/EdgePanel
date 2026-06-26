@@ -524,8 +524,12 @@ extension UsageLoader {
                 if !cwdFull.isEmpty && model != nil { break }
             }
 
+            // cwd for the phone = the session's CREATION dir (resumable + matches the
+            // transcript dir for history), not the latest cwd. project label stays the
+            // latest cwd basename (more meaningful for "where work is happening").
+            let resumeCwd = Self.headCwd(u) ?? cwdFull
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
-                                   cwd: cwdFull, model: model, promptAt: promptAt, promptText: promptText,
+                                   cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete))
         }
         return out
@@ -647,17 +651,23 @@ extension UsageLoader {
     /// (tool_result continuation, or Claude Code injected context).
     private static func userPromptText(_ o: [String: Any]) -> String? {
         guard (o["type"] as? String) == "user", let m = o["message"] as? [String: Any] else { return nil }
+        let injected = ["<system-reminder", "<command-", "<local-command", "<user-memory",
+                        "Caveat:", "[Request interrupted", "This session is being continued"]
         var text: String?
         if let s = m["content"] as? String { text = s }
         else if let blocks = m["content"] as? [[String: Any]] {
-            let texts = blocks.compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
-            if texts.isEmpty { return nil }   // tool_result-only = mid-turn continuation
+            // Keep only real text blocks, dropping injected-context blocks individually
+            // — so a real prompt preceded by an injected block isn't lost (which froze
+            // WORKING NOW on an old prompt).
+            let texts = blocks.compactMap { b -> String? in
+                guard (b["type"] as? String) == "text", let t = b["text"] as? String else { return nil }
+                let tt = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (tt.isEmpty || injected.contains { tt.hasPrefix($0) }) ? nil : tt
+            }
+            if texts.isEmpty { return nil }   // tool_result / injected-only = mid-turn continuation
             text = texts.joined(separator: " ")
         }
         guard var t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
-        // Drop messages that are purely injected context.
-        let injected = ["<system-reminder", "<command-", "<local-command", "<user-memory",
-                        "Caveat:", "[Request interrupted", "This session is being continued"]
         if injected.contains(where: { t.hasPrefix($0) }) { return nil }
         // Strip a system-reminder appended to an otherwise-real prompt.
         if let r = t.range(of: "<system-reminder") { t = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -705,6 +715,31 @@ extension UsageLoader {
         return Array(out.suffix(limit))
     }
 
+    private static let headCwdLock = NSLock()
+    private static var headCwdCache: [String: String] = [:]   // sessionId → creation cwd (the resumable project dir)
+
+    /// The cwd the session was CREATED in (first record) — the project dir that
+    /// `claude --resume` needs. Resume is cwd-sensitive: run from the wrong dir it
+    /// fails with "No conversation found". The latest cwd in the transcript can
+    /// differ (you cd'd), so we must use the creation cwd to resume from the phone.
+    static func headCwd(_ url: URL) -> String? {
+        let id = url.deletingPathExtension().lastPathComponent
+        headCwdLock.lock(); let cached = headCwdCache[id]; headCwdLock.unlock()
+        if let cached { return cached }
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+        let data = (try? fh.read(upToCount: 131072)) ?? Data()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+               let cwd = o["cwd"] as? String, !cwd.isEmpty {
+                headCwdLock.lock(); headCwdCache[id] = cwd; headCwdLock.unlock()
+                return cwd
+            }
+        }
+        return nil
+    }
+
     /// The last `maxBytes` of a file as text, dropping the partial first line.
     /// Lets the working-session scan stay fast on huge transcripts.
     private static func tailString(_ url: URL, maxBytes: Int) -> String? {
@@ -714,7 +749,10 @@ extension UsageLoader {
         let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
         try? fh.seek(toOffset: start)
         let data = (try? fh.readToEnd()) ?? Data()
-        guard var text = String(data: data, encoding: .utf8) else { return nil }
+        // Lossy decode: the tail can start mid-codepoint, where String(data:utf8:)
+        // returns nil and silently drops all history. Dropping the partial first line
+        // removes any replacement chars from the split.
+        var text = String(decoding: data, as: UTF8.self)
         if start > 0, let nl = text.firstIndex(of: "\n") { text = String(text[text.index(after: nl)...]) }
         return text
     }

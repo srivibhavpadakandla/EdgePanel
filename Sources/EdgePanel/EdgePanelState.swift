@@ -305,16 +305,19 @@ final class EdgePanelState: ObservableObject {
     }
 
     private var lastPushedWorkingIds: Set<String> = []
+    private var lastAggregatePush = Date.distantPast
 
-    /// Push the aggregate Live Activity state to the phone via APNs whenever the set
-    /// of working sessions changes — so the Dynamic Island ends (and reflects which
-    /// chats are running) seamlessly even when the app is suspended or fully closed.
-    /// The timer/tokens self-tick on the device, so we only push on membership change.
+    /// Push the aggregate Live Activity state to the phone via APNs so the Dynamic
+    /// Island ends/updates seamlessly even when the app is suspended or fully closed.
+    /// Push on membership change, AND every ~12s while running so the token counts
+    /// refresh on the Lock Screen (tokens don't self-tick like the timer does).
     func pushAggregate(working: [LiveSession]) {
         guard APNsPusher.shared.enabled, let token = activityPushTokens["edgepanel"] else { return }
         let ids = Set(working.map { $0.id })
-        guard ids != lastPushedWorkingIds else { return }
+        let membershipChanged = ids != lastPushedWorkingIds
+        guard membershipChanged || (!working.isEmpty && Date().timeIntervalSince(lastAggregatePush) > 12) else { return }
         lastPushedWorkingIds = ids
+        lastAggregatePush = Date()
         if working.isEmpty {
             APNsPusher.shared.pushActivity(token: token, event: "end",
                 contentState: ["sessions": [[String: Any]](), "done": true, "doneDetail": "finished"])
@@ -350,17 +353,11 @@ final class EdgePanelState: ObservableObject {
         let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
         let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
         let detail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
-        if APNsPusher.shared.enabled {
-            if let tok = activityPushTokens[s.id] {
-                let state: [String: Any] = ["project": s.project, "prompt": s.promptText ?? "",
-                                            "startEpoch": s.promptAt?.timeIntervalSince1970 ?? 0,
-                                            "tokens": s.turnTokens, "done": true, "doneDetail": detail]
-                APNsPusher.shared.pushActivity(token: tok, event: "end", contentState: state)
-                activityPushTokens[s.id] = nil
-            }
-            if let dt = devicePushToken {
-                APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
-            }
+        // The Live Activity itself is ended by pushAggregate (one aggregate activity);
+        // here we only fire the "done" alert. (A per-session activity push would carry
+        // the wrong content-state schema, so it's intentionally not done here.)
+        if APNsPusher.shared.enabled, let dt = devicePushToken {
+            APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
         }
         // Free fully-closed path — skip sub-15s blips so it only pings for turns
         // you'd actually wait on.

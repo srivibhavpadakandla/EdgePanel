@@ -17,6 +17,7 @@ final class ActivityManager {
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
     private var lastPermId: String?        // permission request already surfaced
     private var lastQuestionId: String?    // question already surfaced
+    private var pushTokenTask: Task<Void, Never>?
 
     /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
     var onPushToken: ((String, String?, String) -> Void)?
@@ -97,6 +98,7 @@ final class ActivityManager {
                               dismissalPolicy: .after(Date().addingTimeInterval(15)))
             }
             aggregate = nil
+            pushTokenTask?.cancel(); pushTokenTask = nil
             return
         }
 
@@ -117,7 +119,8 @@ final class ActivityManager {
     /// Forward the Live Activity's APNs push token to the Mac, so it can end/update
     /// the Island via push when the app is suspended or fully closed (Tier 2).
     private func observePushToken(_ act: Activity<WorkingAttributes>) {
-        Task {
+        pushTokenTask?.cancel()
+        pushTokenTask = Task {
             for await tokenData in act.pushTokenUpdates {
                 let hex = tokenData.map { String(format: "%02x", $0) }.joined()
                 onPushToken?("activity", "edgepanel", hex)
