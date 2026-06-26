@@ -205,7 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairingWindow: NSWindow?
     @objc private func showPairing() {
         let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_LAN_PORT"] ?? "") ?? 8788
-        let view = PairingView(host: "\(Self.lanIP()):\(port)", token: pairingToken())
+        let host = ProcessInfo.processInfo.environment["EDGEPANEL_PAIR_HOST"] ?? "\(Self.lanIP()):\(port)"
+        let view = PairingView(host: host, token: pairingToken())
         if pairingWindow == nil {
             let win = NSWindow(contentViewController: NSHostingController(rootView: view))
             win.title = "Pair iPhone"

@@ -54,7 +54,7 @@ final class EdgeClient: ObservableObject {
     @Published var connected = false
     @Published var lastError: String?
 
-    @AppStorage("edgepanel.host") var host: String = "192.168.87.250:8788"
+    @AppStorage("edgepanel.host") var host: String = ""   // set by pairing (QR/manual); empty → show pairing
     @AppStorage("edgepanel.token") var token: String = ""
 
     private var timer: Timer?

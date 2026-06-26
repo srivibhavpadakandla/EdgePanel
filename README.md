@@ -103,9 +103,22 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 ```
 
 **Pairing.** Mac: menu-bar icon → **Pair iPhone…** shows a QR (host + token).
-Phone: **gear → Scan QR from your Mac** (or type the address + token). Both
-devices must be on the same network. The Mac serves a token-protected
-`GET /snapshot` on `:8788` (and `POST /open` to open a chat on the Mac).
+Phone: **gear → Scan QR from your Mac** (or type the address + token). The Mac
+serves a token-protected `GET /snapshot` on `:8788` (and `POST /open` to open a
+chat on the Mac). All traffic is direct phone↔Mac — nothing leaves your devices.
+
+**Reaching the Mac.** On a home network with no client isolation, the LAN IP
+just works. But many routers (and most phone hotspots) **isolate clients**, so
+the phone can't see the Mac even on the same Wi-Fi — and the LAN IP never works
+off-network. The robust fix is [Tailscale](https://tailscale.com): install it on
+both, sign in with the same account, and pair to the Mac's `100.x` tailnet IP.
+Then it works on any Wi-Fi *and* on cellular, end-to-end encrypted. Launch the
+Mac app with `EDGEPANEL_PAIR_HOST=100.x.x.x:8788` so the QR encodes the tailnet
+address instead of the LAN IP. (The app's ATS allows plain HTTP, so it rides the
+encrypted Tailscale tunnel with no HTTPS setup. Note: the Tailscale `100.64/10`
+range is *not* "local networking" to iOS, so the Info.plist uses
+`NSAllowsArbitraryLoads` **alone** — adding `NSAllowsLocalNetworking` would make
+iOS ignore it and block the connection.)
 
 **Live Activity (Tier 1, no account needed).** When a prompt starts, the app
 shows a Dynamic Island activity with the project + a self-ticking timer; it flips

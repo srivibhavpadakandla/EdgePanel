@@ -3,14 +3,16 @@ import UserNotifications
 import UIKit
 import Foundation
 
-/// Drives Live Activities (Dynamic Island) from the working-now state, and fires
-/// local notifications when a prompt finishes or usage crosses a threshold.
+/// Drives ONE aggregate Live Activity (Dynamic Island) from the working-now
+/// state — every running prompt appears in it, so concurrent prompts show
+/// together — and fires local notifications when a prompt finishes or usage
+/// crosses a threshold.
 @MainActor
 final class ActivityManager {
     static let shared = ActivityManager()
 
-    private var activities: [String: Activity<WorkingAttributes>] = [:]
-    private var last: [String: EdgeSnapshot.Working] = [:]
+    private var aggregate: Activity<WorkingAttributes>?
+    private var last: [String: EdgeSnapshot.Working] = [:]   // last-seen working set (for done detail)
     private var lastPlanPct: Double = 0
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
 
@@ -18,58 +20,51 @@ final class ActivityManager {
     var onPushToken: ((String, String?, String) -> Void)?
 
     func requestNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
-            guard ok else { return }
-            Task { @MainActor in UIApplication.shared.registerForRemoteNotifications() }   // device token (Tier 2)
-        }
+        // Local notifications only (no remote push → no paid-account entitlement).
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
-    /// Reconcile Live Activities with the current working sessions.
+    /// Reconcile the aggregate Live Activity with the current working sessions.
     func sync(working: [EdgeSnapshot.Working]) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         let nowIds = Set(working.map { $0.id })
 
-        // Start or update an activity per working session.
-        for w in working {
-            let state = WorkingAttributes.ContentState(
-                project: w.project, prompt: w.display,
-                startEpoch: w.promptAtEpoch ?? Date().timeIntervalSince1970,
-                tokens: w.turnTokens, done: false, doneDetail: nil)
-            if let act = activities[w.id] {
-                Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
-            } else if activities.count < 2 {            // keep the Island uncluttered
-                if let act = try? Activity.request(attributes: WorkingAttributes(sessionId: w.id),
-                                                   content: ActivityContent(state: state, staleDate: nil),
-                                                   pushType: .token) {
-                    activities[w.id] = act
-                    let sid = w.id
-                    Task { @MainActor in   // forward the Live Activity push token to the Mac (Tier 2)
-                        for await data in act.pushTokenUpdates {
-                            self.onPushToken?("activity", sid, data.map { String(format: "%02x", $0) }.joined())
-                        }
-                    }
-                }
-            }
-            last[w.id] = w
-        }
+        // Sessions that were running last tick but aren't now → finished → notify.
+        let finished = last.values.filter { !nowIds.contains($0.id) }
+        for w in finished { notify(title: "✓ \(w.project) finished", body: doneDetail(w)) }
 
-        // A tracked session that's no longer working → flip to "done", end, notify.
-        for (id, act) in activities where !nowIds.contains(id) {
-            let prev = last[id]
-            let detail = doneDetail(prev)
-            let done = WorkingAttributes.ContentState(
-                project: prev?.project ?? "Chat", prompt: prev?.display ?? "",
-                startEpoch: prev?.promptAtEpoch ?? Date().timeIntervalSince1970,
-                tokens: prev?.turnTokens ?? 0, done: true, doneDetail: detail)
+        let lines = working.map { w in
+            WorkingAttributes.Line(
+                id: w.id, project: w.project, prompt: w.display,
+                startEpoch: w.promptAtEpoch ?? Date().timeIntervalSince1970,
+                tokens: w.turnTokens)
+        }
+        last = Dictionary(working.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        // Nothing running → flip the activity to a brief "done" state, then end it.
+        if lines.isEmpty {
+            guard let act = aggregate else { return }
+            let detail = finished.count == 1 ? doneDetail(finished[0])
+                       : finished.isEmpty   ? "finished"
+                                            : "\(finished.count) chats finished"
+            let done = WorkingAttributes.ContentState(sessions: [], done: true, doneDetail: detail)
             Task {
                 await act.update(ActivityContent(state: done, staleDate: nil))
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 await act.end(ActivityContent(state: done, staleDate: nil),
-                              dismissalPolicy: .after(Date().addingTimeInterval(20)))
+                              dismissalPolicy: .after(Date().addingTimeInterval(15)))
             }
-            notify(title: "✓ \(prev?.project ?? "Chat") finished", body: detail)
-            activities[id] = nil
-            last[id] = nil
+            aggregate = nil
+            return
+        }
+
+        let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
+        if let act = aggregate {
+            Task { await act.update(ActivityContent(state: state, staleDate: nil)) }
+        } else if let act = try? Activity.request(
+            attributes: WorkingAttributes(id: "edgepanel"),
+            content: ActivityContent(state: state, staleDate: nil)) {
+            aggregate = act
         }
     }
 
@@ -84,8 +79,7 @@ final class ActivityManager {
         }
     }
 
-    private func doneDetail(_ w: EdgeSnapshot.Working?) -> String {
-        guard let w else { return "finished" }
+    private func doneDetail(_ w: EdgeSnapshot.Working) -> String {
         let elapsed = w.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
         let m = Int(elapsed) / 60, s = Int(elapsed) % 60
         let t = m > 0 ? "\(m)m \(s)s" : "\(s)s"
