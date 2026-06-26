@@ -1,4 +1,6 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 let S: CGFloat = 1024
 func col(_ r: Int, _ g: Int, _ b: Int, _ a: CGFloat = 1) -> NSColor {
@@ -44,5 +46,15 @@ if let base = NSImage(systemSymbolName: "bird.fill", accessibilityDescription: n
 
 NSGraphicsContext.restoreGraphicsState()
 let out = CommandLine.arguments[1]
-try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
-print("wrote \(out)")
+// Flatten to an OPAQUE PNG (no alpha channel) — iOS app icons must not have alpha,
+// or they render as a white/blank square in notifications.
+let cg = rep.cgImage!
+let ctx = CGContext(data: nil, width: Int(S), height: Int(S), bitsPerComponent: 8, bytesPerRow: 0,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+ctx.draw(cg, in: CGRect(x: 0, y: 0, width: S, height: S))
+let flat = ctx.makeImage()!
+let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: out) as CFURL, UTType.png.identifier as CFString, 1, nil)!
+CGImageDestinationAddImage(dest, flat, nil)
+CGImageDestinationFinalize(dest)
+print("wrote \(out) (opaque)")
