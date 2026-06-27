@@ -11,6 +11,7 @@ struct EdgeSnapshot: Codable {
     var calendar: [CalDay]
     var pending: Pending?
     var question: Question?
+    var autoApprove: Bool?           // Autonomous mode on (every permission auto-allowed)
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -145,6 +146,39 @@ final class EdgeClient: ObservableObject {
         guard let (data, _) = try? await URLSession.shared.data(for: req),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return obj["jobId"] as? String
+    }
+
+    struct Project: Identifiable, Hashable { var name: String; var cwd: String; var id: String { cwd } }
+
+    /// Projects on the Mac you can start a new autonomous task in.
+    func fetchProjects() async -> [Project] {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/projects") else { return [] }
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["projects"] as? [[String: String]] else { return [] }
+        return arr.compactMap { p in p["cwd"].map { Project(name: p["name"] ?? ($0 as NSString).lastPathComponent, cwd: $0) } }
+    }
+
+    /// Toggle Autonomous (auto-approve) mode on the Mac.
+    func setAutoApprove(_ on: Bool) {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/automode") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["on": on])
+        Task { _ = try? await URLSession.shared.data(for: req); await poll() }
+    }
+
+    /// Stop a running chat turn.
+    func cancelChat(jobId: String) {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/cancel") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["jobId": jobId])
+        Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
     /// Load a session's real conversation history from the Mac transcript.

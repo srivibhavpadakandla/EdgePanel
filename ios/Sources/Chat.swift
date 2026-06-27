@@ -14,11 +14,14 @@ struct ChatMessage: Codable, Identifiable {
 /// chat in sessions that are actually running on your Mac; we load their true
 /// transcript history and continue them with `claude --resume`.
 struct ChatThread: Codable, Identifiable {
-    var id: String              // = session id
+    var id: String              // stable UI key (for existing sessions, == the session id)
+    var sessionId: String?      // real Claude session to --resume (adopted for new tasks)
     var project: String
     var cwd: String
     var messages: [ChatMessage] = []
     var updatedAt = Date()
+    /// What to pass as --resume; nil = start a fresh session (a new task not yet adopted).
+    var resumeId: String? { sessionId ?? (id.hasPrefix("new-") ? nil : id) }
 }
 
 @MainActor
@@ -26,6 +29,7 @@ final class ChatStore: ObservableObject {
     static let shared = ChatStore()
     @Published var threads: [ChatThread] = []
     @Published var busy: Set<String> = []        // session ids awaiting a reply
+    @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop)
 
     private let url: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -41,8 +45,9 @@ final class ChatStore: ObservableObject {
         if let i = threads.firstIndex(where: { $0.id == sessionId }) {
             threads[i].project = project
             if !cwd.isEmpty { threads[i].cwd = cwd }
-        } else {
-            threads.insert(ChatThread(id: sessionId, project: project, cwd: cwd), at: 0)
+            if threads[i].sessionId == nil, !sessionId.hasPrefix("new-") { threads[i].sessionId = sessionId }
+        } else if !sessionId.hasPrefix("new-") {   // never create a thread keyed by a temp id
+            threads.insert(ChatThread(id: sessionId, sessionId: sessionId, project: project, cwd: cwd), at: 0)
         }
         save()
         refreshHistory(sessionId)
@@ -51,13 +56,13 @@ final class ChatStore: ObservableObject {
     /// Replace the thread's messages with the real transcript (the source of truth
     /// — includes turns you ran on the PC and from the phone). Skipped while a reply
     /// is in flight so we don't clobber the optimistic bubbles.
-    func refreshHistory(_ sessionId: String) {
-        guard let t = thread(sessionId) else { return }
+    func refreshHistory(_ threadId: String) {
+        guard let t = thread(threadId), let resume = t.resumeId else { return }   // new task not yet adopted → no history
         let cwd = t.cwd
         Task {
-            let hist = await EdgeClient.shared.fetchHistory(sessionId: sessionId, cwd: cwd)
-            guard !hist.isEmpty, !busy.contains(sessionId),
-                  let i = threads.firstIndex(where: { $0.id == sessionId }) else { return }
+            let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: cwd)
+            guard !hist.isEmpty, !busy.contains(threadId),
+                  let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
             threads[i].messages = hist.map {
                 ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text)
             }
@@ -65,37 +70,74 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    func send(_ sessionId: String, _ text: String) {
-        guard let i = threads.firstIndex(where: { $0.id == sessionId }) else { return }
+    func send(_ threadId: String, _ text: String) {
+        guard let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
         threads[i].messages.append(ChatMessage(role: .user, text: text))
         threads[i].updatedAt = Date()
-        busy.insert(sessionId); save()
-        let cwd = threads[i].cwd
+        busy.insert(threadId); save()
+        let cwd = threads[i].cwd, resume = threads[i].resumeId
 
         Task {
-            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: sessionId, message: text) else {
-                finish(sessionId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
+            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
+                finish(threadId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
-            // Poll fast and render the reply token-by-token as the Mac streams it.
-            var streamId: UUID?
-            for _ in 0..<1400 {                   // ~12 min at 0.5s
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard let job = await EdgeClient.shared.pollChat(jobId) else { continue }
-                if job.status == "running" {
-                    if let partial = job.result, !partial.isEmpty {
-                        streamId = upsertStream(sessionId, streamId, partial)
-                    }
-                    continue
-                }
-                if job.status == "done" {
-                    finalize(sessionId, streamId, job.result ?? "(no reply)", .assistant); return
-                }
-                if job.status == "error" {
-                    finalize(sessionId, streamId, job.error ?? "Something went wrong.", .error); return
-                }
-            }
-            finalize(sessionId, streamId, "Timed out waiting for a reply.", .error)
+            busyJob[threadId] = jobId
+            await streamJob(jobId, into: threadId)
         }
+    }
+
+    /// Stop the running turn for a thread (terminates `claude` on the Mac).
+    func stop(_ id: String) {
+        guard let job = busyJob[id] else { return }
+        EdgeClient.shared.cancelChat(jobId: job)
+    }
+
+    /// Start a BRAND-NEW autonomous task in `cwd`. The thread keeps a stable id and
+    /// adopts the real Claude session id (into `sessionId`) the moment the Mac reports
+    /// it, so the next turn resumes the same session — without re-keying an open view.
+    @discardableResult
+    func startNewTask(cwd: String, project: String, _ text: String) -> String {
+        let tempId = "new-" + UUID().uuidString
+        var t = ChatThread(id: tempId, project: project, cwd: cwd)
+        t.messages.append(ChatMessage(role: .user, text: text))
+        threads.insert(t, at: 0)
+        busy.insert(tempId); save()
+
+        Task {
+            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text) else {
+                finish(tempId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
+            }
+            busyJob[tempId] = jobId
+            await streamJob(jobId, into: tempId)
+        }
+        return tempId
+    }
+
+    /// Shared streaming poll loop: render the reply token-by-token, adopt the real
+    /// session id when it appears, and settle on done/error.
+    private func streamJob(_ jobId: String, into threadId: String) async {
+        var streamId: UUID?
+        for _ in 0..<1400 {                       // ~12 min at 0.5s
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let job = await EdgeClient.shared.pollChat(jobId) else { continue }
+            if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
+            if job.status == "running" {
+                if let partial = job.result, !partial.isEmpty { streamId = upsertStream(threadId, streamId, partial) }
+                continue
+            }
+            if job.status == "done" {
+                finalize(threadId, streamId, job.result ?? "(no reply)", .assistant); busyJob[threadId] = nil; return
+            }
+            if job.status == "error" {
+                finalize(threadId, streamId, job.error ?? "Something went wrong.", .error); busyJob[threadId] = nil; return
+            }
+        }
+        finalize(threadId, streamId, "Timed out waiting for a reply.", .error); busyJob[threadId] = nil
+    }
+
+    private func adopt(_ threadId: String, sessionId: String) {
+        guard let i = threads.firstIndex(where: { $0.id == threadId }), threads[i].sessionId != sessionId else { return }
+        threads[i].sessionId = sessionId; save()
     }
 
     /// Create-or-update the in-progress assistant bubble with the latest streamed text.
@@ -123,7 +165,7 @@ final class ChatStore: ObservableObject {
             threads[i].updatedAt = Date()
             threads.sort { $0.updatedAt > $1.updatedAt }
         }
-        busy.remove(id); save()
+        busy.remove(id); busyJob[id] = nil; save()
     }
 
     private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
@@ -144,16 +186,21 @@ final class ChatStore: ObservableObject {
 struct ChatListView: View {
     @ObservedObject private var store = ChatStore.shared
     @EnvironmentObject var client: EdgeClient
+    @State private var showNew = false
+    @State private var openId: String?
     var body: some View {
         NavigationStack {
             ZStack {
                 T.bg.ignoresSafeArea()
                 if store.threads.isEmpty {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
                         Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 34)).foregroundColor(T.accent2)
-                        Text("No chats yet").font(.claude(15, .semibold)).foregroundColor(T.text)
-                        Text("Open a chat from WORKING NOW on the Usage tab to talk to a session running on your Mac. It’ll be saved here so you can go back to it.")
-                            .font(.claude(12)).foregroundColor(T.subtext).multilineTextAlignment(.center).padding(.horizontal, 36)
+                        Text("Drive Claude Code from here").font(.claude(15, .semibold)).foregroundColor(T.text)
+                        Text("Tap ＋ to start a new task in any project on your Mac — it runs autonomously and streams back here. Or open a session from WORKING NOW on the Usage tab.")
+                            .font(.claude(12)).foregroundColor(T.subtext).multilineTextAlignment(.center).padding(.horizontal, 34)
+                        Button { showNew = true } label: {
+                            Label("New Task", systemImage: "plus.circle.fill").font(.claude(14, .semibold))
+                        }.buttonStyle(.borderedProminent).tint(T.accent).padding(.top, 4)
                     }
                 } else {
                     ScrollView {
@@ -168,7 +215,100 @@ struct ChatListView: View {
                     }
                 }
             }
-            .navigationTitle("Chats")
+            .navigationTitle("Command")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { AutonomyToggle().environmentObject(client) }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showNew = true } label: { Image(systemName: "plus.circle.fill").font(.system(size: 19, weight: .semibold)) }
+                }
+            }
+            .navigationDestination(item: $openId) { id in
+                ChatThreadView(sessionId: id, project: store.thread(id)?.project ?? "Task", cwd: store.thread(id)?.cwd ?? "")
+            }
+        }
+        .tint(T.accent)
+        .sheet(isPresented: $showNew) {
+            NewTaskSheet { id in showNew = false; openId = id }.environmentObject(client)
+        }
+    }
+}
+
+/// Toolbar control for Autonomous (auto-approve) mode — flip it on and the Mac
+/// auto-allows every permission so work runs hands-off.
+private struct AutonomyToggle: View {
+    @EnvironmentObject var client: EdgeClient
+    private var on: Bool { client.snapshot?.autoApprove ?? false }
+    var body: some View {
+        Button { client.setAutoApprove(!on) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: on ? "bolt.fill" : "bolt.slash.fill")
+                Text(on ? "Autonomous" : "Manual").font(.claude(12, .semibold))
+            }
+            .foregroundColor(on ? T.accent : T.subtext)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(Capsule().fill(on ? T.accent.opacity(0.15) : T.track))
+        }
+    }
+}
+
+/// Start a brand-new autonomous task: pick a project on the Mac + describe the task.
+struct NewTaskSheet: View {
+    @EnvironmentObject var client: EdgeClient
+    @Environment(\.dismiss) private var dismiss
+    var onStart: (String) -> Void
+    @State private var projects: [EdgeClient.Project] = []
+    @State private var picked: EdgeClient.Project?
+    @State private var task = ""
+    @FocusState private var focused: Bool
+
+    private var canStart: Bool { picked != nil && !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                T.bg.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("PROJECT").font(.claude(11, .semibold)).foregroundColor(T.subtext)
+                        if projects.isEmpty {
+                            HStack { ProgressView().tint(T.accent); Text("Loading projects…").font(.claude(12)).foregroundColor(T.subtext) }
+                        }
+                        ForEach(projects) { p in
+                            Button { picked = p } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: picked == p ? "checkmark.circle.fill" : "folder")
+                                        .foregroundColor(picked == p ? T.accent : T.subtext)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(p.name).font(.claude(14, .semibold)).foregroundColor(T.text).lineLimit(1)
+                                        Text(p.cwd).font(.claude(10)).foregroundColor(T.subtext).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 4)
+                                }
+                                .padding(11)
+                                .background(RoundedRectangle(cornerRadius: 11).fill(picked == p ? T.accent.opacity(0.13) : T.track))
+                            }.buttonStyle(.plain)
+                        }
+                        Text("TASK").font(.claude(11, .semibold)).foregroundColor(T.subtext).padding(.top, 6)
+                        TextField("What should Claude Code do?", text: $task, axis: .vertical)
+                            .focused($focused).lineLimit(3...10)
+                            .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(T.track)).foregroundColor(T.text)
+                        Text("Runs with full autonomy (permissions bypassed) and streams the reply into a new chat.")
+                            .font(.claude(11)).foregroundColor(T.subtext)
+                    }.padding(16)
+                }
+            }
+            .navigationTitle("New Task").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Start") {
+                        guard let p = picked else { return }
+                        let t = task.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onStart(ChatStore.shared.startNewTask(cwd: p.cwd, project: p.name, t))
+                    }.disabled(!canStart)
+                }
+            }
+            .task { projects = await client.fetchProjects(); if picked == nil { picked = projects.first } }
         }
         .tint(T.accent)
     }
@@ -239,14 +379,20 @@ struct ChatThreadView: View {
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .background(RoundedRectangle(cornerRadius: 18).fill(T.track))
                 .foregroundColor(T.text)
-            Button {
-                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty, !busy else { return }
-                store.send(sessionId, text); draft = ""; focused = false
-            } label: {
-                Image(systemName: "arrow.up.circle.fill").font(.system(size: 30))
-                    .foregroundColor(draft.isEmpty || busy ? T.subtext : T.accent)
-            }.disabled(draft.isEmpty || busy)
+            if busy {
+                Button { store.stop(sessionId) } label: {
+                    Image(systemName: "stop.circle.fill").font(.system(size: 30)).foregroundColor(T.red)
+                }
+            } else {
+                Button {
+                    let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { return }
+                    store.send(sessionId, text); draft = ""; focused = false
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 30))
+                        .foregroundColor(draft.isEmpty ? T.subtext : T.accent)
+                }.disabled(draft.isEmpty)
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(T.bg)
