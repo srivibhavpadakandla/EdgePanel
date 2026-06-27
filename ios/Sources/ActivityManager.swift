@@ -24,7 +24,14 @@ final class ActivityManager {
 
     func requestNotifications() {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            // Register for remote notifications so iOS hands us an APNs DEVICE token —
+            // without this the Mac never gets a device token and can't push the
+            // "done"/"permission" alert while the app is closed (they only showed up
+            // when you opened the app and it polled locally).
+            guard granted else { return }
+            DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
+        }
         // Allow / Deny buttons right on the permission notification.
         let allow = UNNotificationAction(identifier: "ALLOW", title: "Allow", options: [.authenticationRequired])
         let deny  = UNNotificationAction(identifier: "DENY",  title: "Deny",  options: [.destructive, .authenticationRequired])
@@ -111,8 +118,10 @@ final class ActivityManager {
                                             : "\(finished.count) chats finished"
             let done = WorkingAttributes.ContentState(sessions: [], done: true, doneDetail: detail)
             Task {
+                // Show the animated "complete" state, hold it, then dismiss — matches the
+                // Mac's push-driven two-step so the done animation looks identical either way.
                 await act.update(ActivityContent(state: done, staleDate: nil))
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
                 await act.end(ActivityContent(state: done, staleDate: nil),
                               dismissalPolicy: .after(Date().addingTimeInterval(6)))
             }

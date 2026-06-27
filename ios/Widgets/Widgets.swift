@@ -85,7 +85,9 @@ struct WorkingLiveActivity: Widget {
             } minimal: {
                 BirdBadge(state: s)
             }
-            .keylineTint(clay)
+            // Green keyline on completion — animates with the working→done push so the
+            // Island visibly flashes "complete" before it's torn down on `end`.
+            .keylineTint(s.done ? olive : clay)
         }
     }
 }
@@ -97,6 +99,7 @@ private struct BirdBadge: View {
         ZStack(alignment: .topTrailing) {
             Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
                 .foregroundColor(state.done ? olive : clay)
+                .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
             if !state.done && state.count > 1 {
                 Text("\(state.count)")
                     .font(.system(size: 9, weight: .bold)).foregroundColor(.black)
@@ -139,12 +142,13 @@ struct LockScreenView: View {
             HStack(spacing: 10) {
                 Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
                     .font(.system(size: 20)).foregroundColor(state.done ? olive : clay)
-                Text(state.done ? "Done"
+                    .contentTransition(.symbolEffect(.replace))   // animated bird→checkmark on done
+                Text(state.done ? "Complete"
                      : (state.count > 1 ? "\(state.count) chats running" : (state.primary?.project ?? "Working")))
                     .font(.system(size: 15, weight: .semibold, design: .serif)).foregroundColor(.white).lineLimit(1)
                 Spacer()
                 if state.done {
-                    Text("done").font(.system(size: 13, weight: .semibold)).foregroundColor(olive)
+                    Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundColor(olive)
                 } else if let p = state.primary {
                     Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))

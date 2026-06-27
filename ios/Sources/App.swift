@@ -93,6 +93,7 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, !client.token.isEmpty {
                 ActivityManager.shared.resendActivityToken()   // re-arm push end after a Mac restart
+                UIApplication.shared.registerForRemoteNotifications()  // re-seed the device token too
                 Task { await client.poll() }
             }
         }
