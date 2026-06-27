@@ -76,26 +76,58 @@ final class ChatStore: ObservableObject {
             guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: sessionId, message: text) else {
                 finish(sessionId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
-            for _ in 0..<400 {                    // ~10 min at 1.5s
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            // Poll fast and render the reply token-by-token as the Mac streams it.
+            var streamId: UUID?
+            for _ in 0..<1400 {                   // ~12 min at 0.5s
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let job = await EdgeClient.shared.pollChat(jobId) else { continue }
-                switch job.status {
-                case "done":  finish(sessionId, .assistant, job.result ?? "(no reply)"); return
-                case "error": finish(sessionId, .error, job.error ?? "Something went wrong."); return
-                default: continue
+                if job.status == "running" {
+                    if let partial = job.result, !partial.isEmpty {
+                        streamId = upsertStream(sessionId, streamId, partial)
+                    }
+                    continue
+                }
+                if job.status == "done" {
+                    finalize(sessionId, streamId, job.result ?? "(no reply)", .assistant); return
+                }
+                if job.status == "error" {
+                    finalize(sessionId, streamId, job.error ?? "Something went wrong.", .error); return
                 }
             }
-            finish(sessionId, .error, "Timed out waiting for a reply.")
+            finalize(sessionId, streamId, "Timed out waiting for a reply.", .error)
         }
     }
 
-    private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
+    /// Create-or-update the in-progress assistant bubble with the latest streamed text.
+    @discardableResult
+    private func upsertStream(_ sessionId: String, _ existing: UUID?, _ text: String) -> UUID {
+        guard let i = threads.firstIndex(where: { $0.id == sessionId }) else { return existing ?? UUID() }
+        if let id = existing, let mi = threads[i].messages.firstIndex(where: { $0.id == id }) {
+            threads[i].messages[mi].text = text
+            return id
+        }
+        let m = ChatMessage(role: .assistant, text: text)
+        threads[i].messages.append(m)
+        return m.id
+    }
+
+    /// Settle the streaming bubble (or append a fresh one if nothing streamed) with the final text.
+    private func finalize(_ id: String, _ streamId: UUID?, _ text: String, _ role: ChatMessage.Role) {
         if let i = threads.firstIndex(where: { $0.id == id }) {
-            threads[i].messages.append(ChatMessage(role: role, text: text))
+            if let sid = streamId, let mi = threads[i].messages.firstIndex(where: { $0.id == sid }) {
+                threads[i].messages[mi].text = text
+                threads[i].messages[mi].role = role
+            } else {
+                threads[i].messages.append(ChatMessage(role: role, text: text))
+            }
             threads[i].updatedAt = Date()
             threads.sort { $0.updatedAt > $1.updatedAt }
         }
         busy.remove(id); save()
+    }
+
+    private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
+        finalize(id, nil, text, role)
     }
     func delete(_ id: String) { threads.removeAll { $0.id == id }; busy.remove(id); save() }
 
@@ -182,7 +214,9 @@ struct ChatThreadView: View {
                     ScrollView {
                         LazyVStack(spacing: 10) {
                             ForEach(thread?.messages ?? []) { Bubble(m: $0) }
-                            if busy { TypingDots().id("typing") }
+                            // Dots only until the streamed reply starts arriving (then the
+                            // growing assistant bubble is the live indicator).
+                            if busy && thread?.messages.last?.role == .user { TypingDots().id("typing") }
                         }.padding(14)
                     }
                     .onChange(of: thread?.messages.count ?? 0) { _, _ in
@@ -224,16 +258,75 @@ private struct Bubble: View {
     var body: some View {
         HStack {
             if m.role == .user { Spacer(minLength: 40) }
-            Text(m.text)
-                .font(.claude(14)).foregroundColor(color)
-                .padding(.horizontal, 12).padding(.vertical, 9)
-                .background(RoundedRectangle(cornerRadius: 14).fill(bg))
-                .textSelection(.enabled)
+            Group {
+                if m.role == .assistant {
+                    MarkdownText(text: m.text)                 // code blocks + inline formatting
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(m.text).font(.claude(14)).foregroundColor(color).textSelection(.enabled)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 14).fill(bg))
             if m.role != .user { Spacer(minLength: 40) }
         }
     }
     private var color: Color { m.role == .user ? .black : (m.role == .error ? T.red : T.text) }
     private var bg: Color { m.role == .user ? T.accent : (m.role == .error ? T.red.opacity(0.14) : T.track) }
+}
+
+/// Lightweight markdown for chat replies: fenced ``` code blocks render in a mono
+/// box (horizontally scrollable); everything else renders with inline markdown
+/// (bold/italic/`code`/links) while preserving line breaks. Robust to a half-streamed
+/// code fence (an unclosed ``` just renders the tail as code).
+private struct MarkdownText: View {
+    let text: String
+    private enum Seg: Identifiable { case text(String), code(String); var id: String { switch self { case .text(let t): return "t"+t; case .code(let c): return "c"+c } } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(segments().enumerated()), id: \.offset) { _, seg in
+                switch seg {
+                case .code(let code):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(code).font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                            .foregroundColor(T.text).textSelection(.enabled)
+                            .padding(10)
+                    }
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.30)))
+                case .text(let md):
+                    Text(inline(md)).font(.claude(14)).foregroundColor(T.text).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func segments() -> [Seg] {
+        let parts = text.components(separatedBy: "```")
+        var out: [Seg] = []
+        for (i, part) in parts.enumerated() {
+            if i % 2 == 1 {
+                var code = part
+                // drop an optional language hint on the fence's first line
+                if let nl = code.firstIndex(of: "\n") {
+                    let lang = code[code.startIndex..<nl].trimmingCharacters(in: .whitespaces)
+                    if lang.count < 16 && !lang.contains(" ") { code = String(code[code.index(after: nl)...]) }
+                }
+                let c = code.trimmingCharacters(in: .newlines)
+                if !c.isEmpty { out.append(.code(c)) }
+            } else {
+                let t = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { out.append(.text(t)) }
+            }
+        }
+        return out.isEmpty ? [.text(text)] : out
+    }
+
+    private func inline(_ s: String) -> AttributedString {
+        (try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
 }
 
 private struct TypingDots: View {

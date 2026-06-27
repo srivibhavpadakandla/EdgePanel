@@ -18,6 +18,7 @@ final class ActivityManager {
     private var lastPermId: String?        // permission request already surfaced
     private var lastQuestionId: String?    // question already surfaced
     private var pushTokenTask: Task<Void, Never>?
+    private var endTask: Task<Void, Never>?   // deferred "done→end" (cancellable if a new turn arrives)
 
     /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
     var onPushToken: ((String, String?, String) -> Void)?
@@ -112,23 +113,29 @@ final class ActivityManager {
 
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
-            guard let act = aggregate else { return }
+            guard let act = aggregate, endTask == nil else { return }   // already ending → don't double-fire
             let detail = finished.count == 1 ? doneDetail(finished[0])
                        : finished.isEmpty   ? "finished"
                                             : "\(finished.count) chats finished"
             let done = WorkingAttributes.ContentState(sessions: [], done: true, doneDetail: detail)
-            Task {
-                // Show the animated "complete" state, hold it, then dismiss — matches the
-                // Mac's push-driven two-step so the done animation looks identical either way.
+            // Keep `aggregate` set until the end actually completes — nil-ing it here let a
+            // new turn within the hold window spawn a DUPLICATE activity.
+            endTask = Task {
                 await act.update(ActivityContent(state: done, staleDate: nil))
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                try? await Task.sleep(nanoseconds: 4_000_000_000)   // hold "✓ Complete" visibly
+                if Task.isCancelled { return }                      // a new turn reclaimed this activity
                 await act.end(ActivityContent(state: done, staleDate: nil),
                               dismissalPolicy: .after(Date().addingTimeInterval(6)))
+                aggregate = nil
+                pushTokenTask?.cancel(); pushTokenTask = nil
+                endTask = nil
             }
-            aggregate = nil
-            pushTokenTask?.cancel(); pushTokenTask = nil
             return
         }
+
+        // A new turn arrived: if an "end" is pending, cancel it and REUSE the same
+        // activity (flip it back to working) rather than ending or duplicating it.
+        if let t = endTask { t.cancel(); endTask = nil }
 
         // Requested with a push token: the Mac pushes "end" (and membership updates)
         // the instant a turn finishes, so the Island stops seamlessly even fully
