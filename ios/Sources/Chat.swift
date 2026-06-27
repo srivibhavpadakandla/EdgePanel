@@ -79,12 +79,39 @@ final class ChatStore: ObservableObject {
         let cwd = threads[i].cwd, resume = threads[i].resumeId
 
         Task {
-            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
+            let r = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text)
+            if r.injected { await deliveredToLive(threadId); return }   // typed into the live editor session
+            guard let jobId = r.jobId else {
                 finish(threadId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
             busyJob[threadId] = jobId
             await streamJob(jobId, into: threadId)
         }
+    }
+
+    /// The message went into the LIVE editor session — its reply streams into the
+    /// transcript, so pull history until the reply lands (or settles).
+    private func deliveredToLive(_ threadId: String) async {
+        var lastLen = -1, stable = 0
+        for _ in 0..<40 {                                  // ~2 min at 3s
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            await pullHistory(threadId)
+            if let last = thread(threadId)?.messages.last, last.role == .assistant {
+                if last.text.count == lastLen { stable += 1; if stable >= 2 { break } }
+                else { lastLen = last.text.count; stable = 0 }
+            }
+        }
+        busy.remove(threadId); busyJob[threadId] = nil; save()
+    }
+
+    /// Replace messages with the transcript — but only once it's caught up to (or past)
+    /// our optimistic count, so the just-sent message isn't briefly wiped.
+    private func pullHistory(_ threadId: String) async {
+        guard let t = thread(threadId), let resume = t.resumeId else { return }
+        let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
+        guard let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
+        let mapped = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
+        if mapped.count >= threads[i].messages.count { threads[i].messages = mapped; threads[i].updatedAt = Date(); save() }
     }
 
     /// Stop the running turn for a thread (terminates `claude` on the Mac).
@@ -105,7 +132,7 @@ final class ChatStore: ObservableObject {
         busy.insert(tempId); save()
 
         Task {
-            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text) else {
+            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text).jobId else {
                 finish(tempId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
             busyJob[tempId] = jobId
