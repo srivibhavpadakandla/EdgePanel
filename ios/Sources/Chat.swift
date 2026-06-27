@@ -77,8 +77,9 @@ final class ChatStore: ObservableObject {
         guard let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
         threads[i].messages.append(ChatMessage(role: .user, text: text))
         threads[i].updatedAt = Date()
+        let cwd = threads[i].cwd, resume = threads[i].resumeId   // capture before the sort changes indices
+        threads.sort { $0.updatedAt > $1.updatedAt }             // float this thread to the top now, not only on completion
         busy.insert(threadId); save()
-        let cwd = threads[i].cwd, resume = threads[i].resumeId
 
         Task {
             let r = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text)
@@ -94,15 +95,18 @@ final class ChatStore: ObservableObject {
     /// The message went into the LIVE editor session — its reply streams into the
     /// transcript, so pull history until the reply lands (or settles).
     private func deliveredToLive(_ threadId: String) async {
-        var lastLen = -1, stable = 0
+        var lastSig = "", stable = 0
         for _ in 0..<40 {                                  // ~2 min at 3s
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if stopRequested.contains(threadId) { break }  // Stop tapped → interrupted
             await pullHistory(threadId)
-            if let last = thread(threadId)?.messages.last, last.role == .assistant {
-                if last.text.count == lastLen { stable += 1; if stable >= 2 { break } }
-                else { lastLen = last.text.count; stable = 0 }
-            }
+            let msgs = thread(threadId)?.messages ?? []
+            // Whole-transcript signature (count + last role + last length): settle only
+            // when it's an assistant reply that's stopped changing across a few polls.
+            let sig = "\(msgs.count)|\(msgs.last?.role.rawValue ?? "")|\(msgs.last?.text.count ?? 0)"
+            if sig == lastSig {
+                if msgs.last?.role == .assistant { stable += 1; if stable >= 3 { break } }
+            } else { lastSig = sig; stable = 0 }
         }
         await pullHistory(threadId)                         // final pull (catches the interrupted state)
         busy.remove(threadId); busyJob[threadId] = nil
@@ -156,10 +160,15 @@ final class ChatStore: ObservableObject {
     /// Shared streaming poll loop: render the reply token-by-token, adopt the real
     /// session id when it appears, and settle on done/error.
     private func streamJob(_ jobId: String, into threadId: String) async {
-        var streamId: UUID?
+        var streamId: UUID?, fails = 0
         for _ in 0..<1400 {                       // ~12 min at 0.5s
             try? await Task.sleep(nanoseconds: 500_000_000)
-            guard let job = await EdgeClient.shared.pollChat(jobId) else { continue }
+            guard let job = await EdgeClient.shared.pollChat(jobId) else {
+                fails += 1                        // unreachable Mac → don't hang busy forever
+                if fails >= 20 { finalize(threadId, streamId, "Lost connection to your Mac.", .error); busyJob[threadId] = nil; return }
+                continue
+            }
+            fails = 0
             if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
             if job.status == "running" {
                 if let partial = job.result, !partial.isEmpty { streamId = upsertStream(threadId, streamId, partial) }
@@ -213,7 +222,18 @@ final class ChatStore: ObservableObject {
     }
     func delete(_ id: String) { threads.removeAll { $0.id == id }; busy.remove(id); save() }
 
-    private func save() { try? JSONEncoder().encode(threads).write(to: url) }
+    private var pendingSave: Task<Void, Never>?
+    /// Debounced, off-main persistence — was a synchronous main-actor disk write on every
+    /// streamed token (a write storm). Coalesce: capture state now, write ~0.6s later.
+    private func save() {
+        pendingSave?.cancel()
+        let snapshot = threads, u = url
+        pendingSave = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            if Task.isCancelled { return }
+            try? JSONEncoder().encode(snapshot).write(to: u)
+        }
+    }
     private func load() {
         if let d = try? Data(contentsOf: url), let t = try? JSONDecoder().decode([ChatThread].self, from: d) {
             threads = t.sorted { $0.updatedAt > $1.updatedAt }
@@ -628,7 +648,13 @@ private struct CodeBlock: View {
 
 // MARK: - markdown parsing helpers
 
+/// Memoize the last few parses so SwiftUI's redundant re-renders of the same message
+/// text (common during streaming) don't re-parse. Body runs on the main thread only,
+/// so this static cache is race-free.
+private enum MDMemo { static var cache: [(text: String, blocks: [MDBlock])] = [] }
+
 private func parseMarkdown(_ text: String) -> [MDBlock] {
+    if let hit = MDMemo.cache.first(where: { $0.text == text }) { return hit.blocks }
     var blocks: [MDBlock] = []
     let lines = text.components(separatedBy: "\n")
     var i = 0
@@ -676,11 +702,13 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
         while i < lines.count {
             let l = trimmed(i)
             if l.isEmpty || l.hasPrefix("```") || l.hasPrefix("#") || l.hasPrefix(">") || l.hasPrefix("⚙ ")
-                || isBullet(l) || numbered(l) != nil || l == "---" { break }
+                || isBullet(l) || numbered(l) != nil || l == "---" || l == "***" || l == "___" { break }
             para.append(lines[i]); i += 1
         }
         if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))) }
     }
+    MDMemo.cache.append((text, blocks))
+    if MDMemo.cache.count > 4 { MDMemo.cache.removeFirst() }   // small LRU across visible messages
     return blocks
 }
 
