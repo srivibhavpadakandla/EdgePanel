@@ -200,6 +200,10 @@ final class EdgeClient: ObservableObject {
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
             snapshot = snap; connected = true; lastError = nil
             ActivityManager.shared.sync(working: snap.working)
+            // Re-seed the Mac with the current Live Activity token on every poll, so it
+            // always has a fresh token to push the "end" — even right after a Mac restart
+            // (which used to leave the Island frozen on a stuck timer).
+            ActivityManager.shared.resendActivityToken()
             ActivityManager.shared.checkUsage(plan: snap.plan)
             ActivityManager.shared.syncPermission(snap.pending)
             ActivityManager.shared.syncQuestion(snap.question)
