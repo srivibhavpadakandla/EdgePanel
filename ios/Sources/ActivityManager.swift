@@ -78,8 +78,10 @@ final class ActivityManager {
         lastQuestionId = q.id
         let c = UNMutableNotificationContent()
         c.title = "Claude is asking you"
-        c.body = q.items.first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer"
+        c.body = q.items.first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to open and answer"
+        c.subtitle = "Tap to answer in the app — it'll wait for you"
         c.sound = .default
+        c.interruptionLevel = .timeSensitive   // more prominent + lingers (banner still auto-hides, the card persists)
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: "q-\(q.id)", content: c, trigger: nil))
     }
