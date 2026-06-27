@@ -95,7 +95,11 @@ final class UsageStore: ObservableObject {
     /// Fire onSessionEnded for sessions that were generating and now aren't.
     private func detectEnded() {
         let working = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
-        for (id, prev) in prevWorking where working[id] == nil { onSessionEnded?(prev) }
+        // Index ALL current sessions (incl. the just-finished ones) — their freshly
+        // recomputed turnTokens include the turn's final message, so the "done"
+        // notification shows the real token count instead of the stale (often 0) value.
+        let byId = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for (id, prev) in prevWorking where working[id] == nil { onSessionEnded?(byId[id] ?? prev) }
         prevWorking = working
         onWorkingChanged?(Array(working.values))
     }
