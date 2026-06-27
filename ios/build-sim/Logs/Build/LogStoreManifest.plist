@@ -6,6 +6,48 @@
 	<integer>12</integer>
 	<key>logs</key>
 	<dict>
+		<key>538C0898-B8A6-4AAF-AF67-735C0F65E4D3</key>
+		<dict>
+			<key>className</key>
+			<string>IDECommandLineBuildLog</string>
+			<key>documentTypeString</key>
+			<string>&lt;nil&gt;</string>
+			<key>domainType</key>
+			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
+			<key>fileName</key>
+			<string>538C0898-B8A6-4AAF-AF67-735C0F65E4D3.xcactivitylog</string>
+			<key>hasPrimaryLog</key>
+			<true/>
+			<key>primaryObservable</key>
+			<dict>
+				<key>highLevelStatus</key>
+				<string>S</string>
+				<key>totalNumberOfAnalyzerIssues</key>
+				<integer>0</integer>
+				<key>totalNumberOfErrors</key>
+				<integer>0</integer>
+				<key>totalNumberOfTestFailures</key>
+				<integer>0</integer>
+				<key>totalNumberOfWarnings</key>
+				<integer>0</integer>
+			</dict>
+			<key>schemeIdentifier-containerName</key>
+			<string>EdgePanelMobile project</string>
+			<key>schemeIdentifier-schemeName</key>
+			<string>EdgePanelMobile</string>
+			<key>schemeIdentifier-sharedScheme</key>
+			<integer>1</integer>
+			<key>signature</key>
+			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
+			<key>timeStartedRecording</key>
+			<real>804234004.350173</real>
+			<key>timeStoppedRecording</key>
+			<real>804234007.97606397</real>
+			<key>title</key>
+			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
+			<key>uniqueIdentifier</key>
+			<string>538C0898-B8A6-4AAF-AF67-735C0F65E4D3</string>
+		</dict>
 		<key>B3B5CC21-C5D3-40FA-A163-F8FBB5A4993F</key>
 		<dict>
 			<key>className</key>
@@ -47,48 +89,6 @@
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>uniqueIdentifier</key>
 			<string>B3B5CC21-C5D3-40FA-A163-F8FBB5A4993F</string>
-		</dict>
-		<key>EA4A4770-2514-43E8-8204-87ADFA629058</key>
-		<dict>
-			<key>className</key>
-			<string>IDECommandLineBuildLog</string>
-			<key>documentTypeString</key>
-			<string>&lt;nil&gt;</string>
-			<key>domainType</key>
-			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
-			<key>fileName</key>
-			<string>EA4A4770-2514-43E8-8204-87ADFA629058.xcactivitylog</string>
-			<key>hasPrimaryLog</key>
-			<true/>
-			<key>primaryObservable</key>
-			<dict>
-				<key>highLevelStatus</key>
-				<string>S</string>
-				<key>totalNumberOfAnalyzerIssues</key>
-				<integer>0</integer>
-				<key>totalNumberOfErrors</key>
-				<integer>0</integer>
-				<key>totalNumberOfTestFailures</key>
-				<integer>0</integer>
-				<key>totalNumberOfWarnings</key>
-				<integer>0</integer>
-			</dict>
-			<key>schemeIdentifier-containerName</key>
-			<string>EdgePanelMobile project</string>
-			<key>schemeIdentifier-schemeName</key>
-			<string>EdgePanelMobile</string>
-			<key>schemeIdentifier-sharedScheme</key>
-			<integer>1</integer>
-			<key>signature</key>
-			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
-			<key>timeStartedRecording</key>
-			<real>804233123.32706499</real>
-			<key>timeStoppedRecording</key>
-			<real>804233126.69535005</real>
-			<key>title</key>
-			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
-			<key>uniqueIdentifier</key>
-			<string>EA4A4770-2514-43E8-8204-87ADFA629058</string>
 		</dict>
 	</dict>
 </dict>

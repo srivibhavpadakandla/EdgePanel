@@ -228,7 +228,11 @@ struct ChatListView: View {
         }
         .tint(T.accent)
         .sheet(isPresented: $showNew) {
-            NewTaskSheet { id in showNew = false; openId = id }.environmentObject(client)
+            // Dismiss the sheet first, then push the new thread (avoids a present/push race).
+            NewTaskSheet { id in
+                showNew = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { openId = id }
+            }.environmentObject(client)
         }
     }
 }
@@ -369,7 +373,12 @@ struct ChatThreadView: View {
         }
         .navigationTitle(project)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { store.open(sessionId: sessionId, project: project, cwd: cwd) }
+        .onAppear {
+            // New WORKING NOW session → create + load history; an existing thread (incl. a
+            // new task that has adopted its real session id) → just refresh its history.
+            if store.thread(sessionId) == nil { store.open(sessionId: sessionId, project: project, cwd: cwd) }
+            else { store.refreshHistory(sessionId) }
+        }
     }
 
     private var composer: some View {

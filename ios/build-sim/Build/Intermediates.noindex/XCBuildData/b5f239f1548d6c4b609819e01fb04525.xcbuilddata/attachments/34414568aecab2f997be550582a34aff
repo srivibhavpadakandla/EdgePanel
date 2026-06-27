@@ -2,9 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>LastAccessedDate</key>
-	<date>2026-06-27T06:20:04Z</date>
-	<key>WorkspacePath</key>
-	<string>/Users/srivibhavp/EdgePanel/ios/EdgePanelMobile.xcodeproj</string>
+	<key>application-identifier</key>
+	<string>8LKHR7QTKA.com.srivibhav.edgepanel.mobile.widgets</string>
 </dict>
 </plist>

@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'EdgePanelMobile' in project 'EdgePanelMobile'
+➜ Explicit dependency on target 'EdgePanelWidgets' in project 'EdgePanelMobile'
+Target 'EdgePanelWidgets' in project 'EdgePanelMobile' (no dependencies)
