@@ -96,18 +96,22 @@ struct WorkingLiveActivity: Widget {
 private struct BirdBadge: View {
     let state: WorkingAttributes.ContentState
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
-                .foregroundColor(state.done ? olive : clay)
-                .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
-            if !state.done && state.count > 1 {
-                Text("\(state.count)")
-                    .font(.system(size: 9, weight: .bold)).foregroundColor(.black)
-                    .frame(minWidth: 12, minHeight: 12)
-                    .background(Circle().fill(olive))
-                    .offset(x: 6, y: -6)
+        // Fixed-size glyph + the count as an OVERLAY (doesn't expand layout bounds), so
+        // the compact Dynamic Island slot sizes to the bird and never clips it. The old
+        // ZStack + .offset badge widened the bounds past the slot → the bird got cut off.
+        Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
+            .font(.system(size: 16))
+            .foregroundColor(state.done ? olive : clay)
+            .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
+            .overlay(alignment: .topTrailing) {
+                if !state.done && state.count > 1 {
+                    Text(state.count > 9 ? "9+" : "\(state.count)")
+                        .font(.system(size: 8, weight: .bold)).foregroundColor(.black)
+                        .padding(.horizontal, 2).frame(minHeight: 11)
+                        .background(Capsule().fill(olive))
+                        .offset(x: 4, y: -3)
+                }
             }
-        }
     }
 }
 
