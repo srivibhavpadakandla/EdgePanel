@@ -109,14 +109,16 @@ final class ChatStore: ObservableObject {
         liveThreads.remove(threadId); stopRequested.remove(threadId); save()
     }
 
-    /// Replace messages with the transcript — but only once it's caught up to (or past)
-    /// our optimistic count, so the just-sent message isn't briefly wiped.
+    /// Replace messages with the transcript (the source of truth) so the live reply
+    /// shows up. Always replace when non-empty — the old "only if count grew" guard
+    /// broke here: fetchHistory is capped at 40, so once an optimistic message pushed
+    /// the thread past 40 the reply never pulled in.
     private func pullHistory(_ threadId: String) async {
         guard let t = thread(threadId), let resume = t.resumeId else { return }
         let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
-        guard let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
-        let mapped = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
-        if mapped.count >= threads[i].messages.count { threads[i].messages = mapped; threads[i].updatedAt = Date(); save() }
+        guard !hist.isEmpty, let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
+        threads[i].messages = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
+        threads[i].updatedAt = Date(); save()
     }
 
     /// Stop the running turn for a thread. A live (injected) turn is interrupted in the
