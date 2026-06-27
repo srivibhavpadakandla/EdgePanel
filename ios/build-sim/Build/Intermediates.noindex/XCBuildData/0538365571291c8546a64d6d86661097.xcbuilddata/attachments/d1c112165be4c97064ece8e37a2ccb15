@@ -1,0 +1,99 @@
+{
+  "" : {
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/EdgePanelMobile-primary.dia",
+    "emit-module-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/EdgePanelMobile-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/EdgePanelMobile-primary-emit-module.dia",
+    "pch" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/EdgePanelMobile-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/EdgePanelMobile-primary.swiftdeps"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Shared/LiveActivity.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/LiveActivity~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/ActivityManager.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/ActivityManager~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/App.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/App~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/Chat.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Chat~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/KeepAlive.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/KeepAlive~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/Model.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Model~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/Scanner.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Scanner~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/Sources/Theme.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/Theme~partial.swiftmodule"
+  },
+  "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "const-values" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.swiftconstvalues",
+    "dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.d",
+    "diagnostics" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.dia",
+    "index-unit-output-path" : "/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "swift-dependencies" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols.swiftdeps",
+    "swiftmodule" : "/Users/srivibhavp/EdgePanel/ios/build-sim/Build/Intermediates.noindex/EdgePanelMobile.build/Debug-iphonesimulator/EdgePanelMobile.build/Objects-normal/arm64/GeneratedAssetSymbols~partial.swiftmodule"
+  }
+}
