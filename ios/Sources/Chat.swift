@@ -29,10 +29,8 @@ struct ChatThread: Codable, Identifiable {
 final class ChatStore: ObservableObject {
     static let shared = ChatStore()
     @Published var threads: [ChatThread] = []
-    @Published var busy: Set<String> = []        // session ids awaiting a reply
+    @Published var busy: Set<String> = []        // thread ids awaiting a reply
     @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop)
-    private var liveThreads: Set<String> = []    // threads whose turn runs in the live editor (interrupt via Escape)
-    private var stopRequested: Set<String> = []  // threads asked to stop the live poll
 
     private let url: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -82,9 +80,7 @@ final class ChatStore: ObservableObject {
         busy.insert(threadId); save()
 
         Task {
-            let r = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text)
-            if r.injected { liveThreads.insert(threadId); await deliveredToLive(threadId); return }   // typed into the live editor session
-            guard let jobId = r.jobId else {
+            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
                 finish(threadId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
             busyJob[threadId] = jobId
@@ -92,48 +88,9 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// The message went into the LIVE editor session — its reply streams into the
-    /// transcript, so pull history until the reply lands (or settles).
-    private func deliveredToLive(_ threadId: String) async {
-        var lastSig = "", stable = 0
-        for _ in 0..<40 {                                  // ~2 min at 3s
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if stopRequested.contains(threadId) { break }  // Stop tapped → interrupted
-            await pullHistory(threadId)
-            let msgs = thread(threadId)?.messages ?? []
-            // Whole-transcript signature (count + last role + last length): settle only
-            // when it's an assistant reply that's stopped changing across a few polls.
-            let sig = "\(msgs.count)|\(msgs.last?.role.rawValue ?? "")|\(msgs.last?.text.count ?? 0)"
-            if sig == lastSig {
-                if msgs.last?.role == .assistant { stable += 1; if stable >= 3 { break } }
-            } else { lastSig = sig; stable = 0 }
-        }
-        await pullHistory(threadId)                         // final pull (catches the interrupted state)
-        busy.remove(threadId); busyJob[threadId] = nil
-        liveThreads.remove(threadId); stopRequested.remove(threadId); save()
-    }
-
-    /// Replace messages with the transcript (the source of truth) so the live reply
-    /// shows up. Always replace when non-empty — the old "only if count grew" guard
-    /// broke here: fetchHistory is capped at 40, so once an optimistic message pushed
-    /// the thread past 40 the reply never pulled in.
-    private func pullHistory(_ threadId: String) async {
-        guard let t = thread(threadId), let resume = t.resumeId else { return }
-        let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
-        guard !hist.isEmpty, let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
-        threads[i].messages = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
-        threads[i].updatedAt = Date(); save()
-    }
-
-    /// Stop the running turn for a thread. A live (injected) turn is interrupted in the
-    /// editor with Escape; a forked --resume turn terminates its `claude` process.
+    /// Stop the running turn — terminates the `claude` process on the Mac.
     func stop(_ id: String) {
-        if liveThreads.contains(id) {
-            EdgeClient.shared.interruptLive(sessionId: thread(id)?.resumeId ?? id)
-            stopRequested.insert(id)          // break the live history poll
-        } else if let job = busyJob[id] {
-            EdgeClient.shared.cancelChat(jobId: job)
-        }
+        if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }
     }
 
     /// Start a BRAND-NEW autonomous task in `cwd`. The thread keeps a stable id and
@@ -148,7 +105,7 @@ final class ChatStore: ObservableObject {
         busy.insert(tempId); save()
 
         Task {
-            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text).jobId else {
+            guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text) else {
                 finish(tempId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
             busyJob[tempId] = jobId

@@ -134,11 +134,10 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req); await poll() }
     }
 
-    /// Send a message to Claude Code on the Mac. Returns either a jobId to poll (a
-    /// forked --resume turn) or injected=true (typed straight into the live editor
-    /// session — its reply lands in the transcript, pulled via fetchHistory).
-    func sendChat(cwd: String, sessionId: String?, message: String) async -> (jobId: String?, injected: Bool) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat") else { return (nil, false) }
+    /// Send a message to Claude Code on the Mac; returns a jobId to poll for the
+    /// streamed reply (a `claude -p [--resume]` turn).
+    func sendChat(cwd: String, sessionId: String?, message: String) async -> String? {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat") else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 10)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -146,9 +145,8 @@ final class EdgeClient: ObservableObject {
         if let sessionId { body["sessionId"] = sessionId }
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         guard let (data, _) = try? await URLSession.shared.data(for: req),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return (nil, false) }
-        if (obj["injected"] as? Bool) == true { return (nil, true) }
-        return (obj["jobId"] as? String, false)
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj["jobId"] as? String
     }
 
     struct Project: Identifiable, Hashable { var name: String; var cwd: String; var id: String { cwd } }
