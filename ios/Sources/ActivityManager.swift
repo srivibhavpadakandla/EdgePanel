@@ -190,7 +190,9 @@ final class ActivityManager {
     }
 
     private func doneDetail(_ w: EdgeSnapshot.Working) -> String {
-        let elapsed = w.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
+        // Clamp: if the app was suspended for a long time, now-since-start would inflate
+        // the figure wildly. A real turn is minutes — cap so we never show a bogus "4h".
+        let elapsed = min(w.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0, 3600)
         let m = Int(elapsed) / 60, s = Int(elapsed) % 60
         let t = m > 0 ? "\(m)m \(s)s" : "\(s)s"
         return "\(t) · \(fmtTokens(w.turnTokens)) tokens"

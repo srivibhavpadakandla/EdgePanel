@@ -31,6 +31,7 @@ struct QRScanner: UIViewControllerRepresentable {
 final class ScannerVC: UIViewController {
     var coord: QRScanner.Coord?
     private let session = AVCaptureSession()
+    private let sessionQueue = DispatchQueue(label: "edgepanel.qr.session")   // serialize start/stop
     private var preview: AVCaptureVideoPreviewLayer?
 
     override func viewDidLoad() {
@@ -52,7 +53,7 @@ final class ScannerVC: UIViewController {
         layer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(layer)
         preview = layer
-        DispatchQueue.global(qos: .userInitiated).async { self.session.startRunning() }
+        sessionQueue.async { self.session.startRunning() }
     }
 
     override func viewDidLayoutSubviews() {
@@ -61,8 +62,9 @@ final class ScannerVC: UIViewController {
     }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        if session.isRunning { session.stopRunning() }
+        sessionQueue.async { [session] in if session.isRunning { session.stopRunning() } }
     }
+    deinit { sessionQueue.async { [session] in if session.isRunning { session.stopRunning() } } }
 
     private func showUnavailable() {
         let label = UILabel()

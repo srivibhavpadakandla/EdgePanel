@@ -6,7 +6,7 @@
 	<integer>12</integer>
 	<key>logs</key>
 	<dict>
-		<key>193D603E-9542-460C-A3D5-CDC1B94AD934</key>
+		<key>B3B5CC21-C5D3-40FA-A163-F8FBB5A4993F</key>
 		<dict>
 			<key>className</key>
 			<string>IDECommandLineBuildLog</string>
@@ -15,7 +15,7 @@
 			<key>domainType</key>
 			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
 			<key>fileName</key>
-			<string>193D603E-9542-460C-A3D5-CDC1B94AD934.xcactivitylog</string>
+			<string>B3B5CC21-C5D3-40FA-A163-F8FBB5A4993F.xcactivitylog</string>
 			<key>hasPrimaryLog</key>
 			<true/>
 			<key>primaryObservable</key>
@@ -40,13 +40,13 @@
 			<key>signature</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>timeStartedRecording</key>
-			<real>804231516.79542804</real>
+			<real>804233465.57208896</real>
 			<key>timeStoppedRecording</key>
-			<real>804231519.45389998</real>
+			<real>804233467.534513</real>
 			<key>title</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>uniqueIdentifier</key>
-			<string>193D603E-9542-460C-A3D5-CDC1B94AD934</string>
+			<string>B3B5CC21-C5D3-40FA-A163-F8FBB5A4993F</string>
 		</dict>
 		<key>EA4A4770-2514-43E8-8204-87ADFA629058</key>
 		<dict>
