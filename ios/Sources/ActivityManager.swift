@@ -19,6 +19,8 @@ final class ActivityManager {
     private var lastQuestionId: String?    // question already surfaced
     private var pushTokenTask: Task<Void, Never>?
     private var endTask: Task<Void, Never>?   // deferred "done→end" (cancellable if a new turn arrives)
+    private var emptyTicks = 0                 // consecutive syncs with no working sessions (done debounce)
+    private var pendingDoneDetail: String?     // captured on the first empty tick, used when we finally end
 
     /// Set by EdgeClient to forward APNs tokens to the Mac (Tier 2). (kind, sessionId?, hexToken)
     var onPushToken: ((String, String?, String) -> Void)?
@@ -91,15 +93,20 @@ final class ActivityManager {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         // Adopt an activity the Mac push-started while we were closed, so we drive the
         // same one (update/end) instead of creating a duplicate.
-        if aggregate == nil, let existing = Activity<WorkingAttributes>.activities.first {
+        if aggregate == nil,
+           let existing = Activity<WorkingAttributes>.activities.first(where: {
+               $0.activityState == .active || $0.activityState == .stale }) {
             aggregate = existing
             observePushToken(existing)
         }
         let nowIds = Set(working.map { $0.id })
 
-        // Sessions that were running last tick but aren't now → finished → notify.
+        // Sessions that were running last tick but aren't now → finished. The "finished"
+        // ALERT is owned SOLELY by the Mac (APNs pushAlert + ntfy pushDone in
+        // EdgePanelState.pushSessionEnded) — debounced 2 scans and reaching the closed app —
+        // so a foreground phone no longer gets a duplicate (and undebounced) local banner for
+        // the same completion. We still compute `finished` to drive the Island "done" detail.
         let finished = last.values.filter { !nowIds.contains($0.id) }
-        for w in finished { notify(title: "✓ \(w.project) finished", body: doneDetail(w)) }
 
         // The timer freezes ~90s after the last update — so on the Lock Screen it
         // stops on its own instead of ticking forever once a turn finishes while the
@@ -116,9 +123,21 @@ final class ActivityManager {
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
             guard let act = aggregate, endTask == nil else { return }   // already ending → don't double-fire
-            let detail = finished.count == 1 ? doneDetail(finished[0])
-                       : finished.isEmpty   ? "finished"
-                                            : "\(finished.count) chats finished"
+            // Require 2 consecutive empty syncs (~3s) before declaring done — a single
+            // missing-session tick (a snapshot built mid-write, the gap between turns) must
+            // not flap the Island to "✓ Complete" and tear it down. `finished` is only
+            // populated on the FIRST empty tick (after that `last` is already empty), so
+            // capture the detail then; fall back to the activity's last primary line.
+            if emptyTicks == 0 {
+                pendingDoneDetail = finished.count > 1 ? "\(finished.count) chats finished"
+                    : finished.first.map { doneDetail($0) }
+                    ?? aggregate?.content.state.primary.map { doneDetail(fromLine: $0) }
+                    ?? "finished"
+            }
+            emptyTicks += 1
+            guard emptyTicks >= 2 else { return }
+            let detail = pendingDoneDetail ?? "finished"
+            emptyTicks = 0; pendingDoneDetail = nil
             let done = WorkingAttributes.ContentState(sessions: [], done: true, doneDetail: detail)
             // Keep `aggregate` set until the end actually completes — nil-ing it here let a
             // new turn within the hold window spawn a DUPLICATE activity.
@@ -135,8 +154,9 @@ final class ActivityManager {
             return
         }
 
-        // A new turn arrived: if an "end" is pending, cancel it and REUSE the same
-        // activity (flip it back to working) rather than ending or duplicating it.
+        // Work is present → reset the empty-debounce, and if an "end" is pending cancel it
+        // and REUSE the same activity (flip it back to working) rather than ending/duplicating.
+        emptyTicks = 0; pendingDoneDetail = nil
         if let t = endTask { t.cancel(); endTask = nil }
 
         // Requested with a push token: the Mac pushes "end" (and membership updates)
@@ -144,9 +164,21 @@ final class ActivityManager {
         // closed — no app wake-up needed. The bounded timer still self-ticks live.
         let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
         let content = ActivityContent(state: state, staleDate: nil)
-        if let act = aggregate {
+        if let act = aggregate, act.activityState == .active {
             Task { await act.update(content) }
         } else {
+            // A dead/ended aggregate (the Mac may have ended it via APNs) → drop the stale
+            // reference + tasks so we don't update a corpse, then re-adopt a still-active
+            // activity if one exists (push-start race) before creating a duplicate.
+            if aggregate != nil {
+                aggregate = nil; endTask?.cancel(); endTask = nil
+                pushTokenTask?.cancel(); pushTokenTask = nil
+            }
+            if let existing = Activity<WorkingAttributes>.activities.first(where: { $0.activityState == .active }) {
+                aggregate = existing; observePushToken(existing)
+                Task { await existing.update(content) }
+                return
+            }
             // Prefer a push-enabled activity (so the Mac can end it via APNs). Fall
             // back to a LOCAL activity if push isn't provisioned — otherwise the
             // Island wouldn't appear at all on a build without a valid push profile.
@@ -204,6 +236,21 @@ final class ActivityManager {
             if mins > 60 || mins <= 0 { forecastAlerted = false }
         } else { forecastAlerted = false }
     }
+
+    /// Done detail synthesized from the Live Activity's own last-known line (used when the
+    /// finished session was never tracked locally, e.g. after adopting a push-started Island)
+    /// — so the "✓ Complete" card shows a real duration + tokens instead of a bare "finished".
+    private func doneDetail(fromLine l: WorkingAttributes.Line) -> String {
+        let elapsed = min(max(Date().timeIntervalSince(l.start), 0), 3600)
+        let m = Int(elapsed) / 60, s = Int(elapsed) % 60
+        let t = m > 0 ? "\(m)m \(s)s" : "\(s)s"
+        return "\(t) · \(fmtTokens(l.tokens)) tokens"
+    }
+
+    /// Drop the finished-session baseline after a connectivity gap, so the next successful
+    /// snapshot RE-SEEDS `last` instead of diffing stale (now-finished) sessions against it
+    /// and flapping the Island to a bogus "done". The Mac still owns the real "done" alert.
+    func resyncBaseline() { last.removeAll(); emptyTicks = 0; pendingDoneDetail = nil }
 
     private func doneDetail(_ w: EdgeSnapshot.Working) -> String {
         // Clamp: if the app was suspended for a long time, now-since-start would inflate

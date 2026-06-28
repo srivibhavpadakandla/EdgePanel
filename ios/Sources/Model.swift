@@ -85,6 +85,7 @@ final class EdgeClient: ObservableObject {
     @AppStorage("edgepanel.token") var token: String = ""
 
     private var timer: Timer?
+    private var lastPollOK: Date?   // gap detection → reset the finished-session baseline after a blackout
 
     func start() {
         ActivityManager.shared.onPushToken = { [weak self] kind, sid, tok in
@@ -243,6 +244,13 @@ final class EdgeClient: ObservableObject {
             guard code == 200 else { throw URLError(.badServerResponse) }
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
             snapshot = snap; connected = true; lastError = nil
+            // After a connectivity gap (>10s blind), sessions may have finished while we
+            // couldn't see them — drop the stale baseline so we re-seed instead of firing a
+            // burst of bogus "done" Island flips for sessions that ended minutes ago.
+            if let prev = lastPollOK, Date().timeIntervalSince(prev) > 10 {
+                ActivityManager.shared.resyncBaseline()
+            }
+            lastPollOK = Date()
             ActivityManager.shared.sync(working: snap.working)
             // Re-seed the Mac with the current Live Activity token on every poll, so it
             // always has a fresh token to push the "end" — even right after a Mac restart

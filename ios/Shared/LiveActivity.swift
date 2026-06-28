@@ -16,7 +16,9 @@ struct WorkingAttributes: ActivityAttributes {
         var startEpoch: Double      // when the prompt was submitted (self-ticking timer)
         var tokens: Int
         var freezeAt: Double = 0    // wall-clock the timer stops at (app refreshes it forward while alive)
-        var start: Date { Date(timeIntervalSince1970: startEpoch) }
+        // Cap the lower bound at "now" so the count-up always starts ticking from 0 even
+        // under Mac/phone clock skew or a missing promptAtEpoch (it never sticks at 00:00).
+        var start: Date { min(Date(timeIntervalSince1970: startEpoch), Date()) }
         /// Upper bound for the bounded timer — the count-up freezes here once the app
         /// stops updating (e.g. phone locked), so it doesn't tick forever after a turn
         /// finishes off-screen.

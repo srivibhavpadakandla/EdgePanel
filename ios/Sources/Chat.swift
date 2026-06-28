@@ -21,6 +21,8 @@ struct ChatThread: Codable, Identifiable {
     var cwd: String
     var messages: [ChatMessage] = []
     var updatedAt = Date()
+    var title: String?          // optional user-given name (falls back to project)
+    var displayName: String { title?.isEmpty == false ? title! : project }
     /// What to pass as --resume; nil = start a fresh session (a new task not yet adopted).
     var resumeId: String? { sessionId ?? (id.hasPrefix("new-") ? nil : id) }
 }
@@ -209,6 +211,11 @@ final class ChatStore: ObservableObject {
         finalize(id, nil, text, role)
     }
     func delete(_ id: String) { threads.removeAll { $0.id == id }; busy.remove(id); save() }
+    func rename(_ id: String, to title: String) {
+        guard let i = threads.firstIndex(where: { $0.id == id }) else { return }
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        threads[i].title = t.isEmpty ? nil : t; save()
+    }
 
     private var pendingSave: Task<Void, Never>?
     /// Debounced, off-main persistence — was a synchronous main-actor disk write on every
@@ -237,6 +244,8 @@ struct ChatListView: View {
     @State private var showNew = false
     @State private var showPanic = false
     @State private var openId: String?
+    @State private var renameId: String?
+    @State private var renameText = ""
     var body: some View {
         NavigationStack {
             ZStack {
@@ -259,6 +268,10 @@ struct ChatListView: View {
                                     ChatThreadView(sessionId: t.id, project: t.project, cwd: t.cwd)
                                 } label: { ThreadRow(t: t, busy: store.busy.contains(t.id)) }
                                     .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button { renameId = t.id; renameText = t.displayName } label: { Label("Rename", systemImage: "pencil") }
+                                        Button(role: .destructive) { store.delete(t.id) } label: { Label("Delete", systemImage: "trash") }
+                                    }
                             }
                         }.padding(16)
                     }
@@ -268,6 +281,11 @@ struct ChatListView: View {
             .confirmationDialog("Stop everything?", isPresented: $showPanic, titleVisibility: .visible) {
                 Button("Stop all & disarm", role: .destructive) { client.panic() }
             } message: { Text("Kills every running task, turns Autonomous off, and denies pending permissions.") }
+            .alert("Rename chat", isPresented: Binding(get: { renameId != nil }, set: { if !$0 { renameId = nil } })) {
+                TextField("Name", text: $renameText)
+                Button("Save") { if let id = renameId { store.rename(id, to: renameText) }; renameId = nil }
+                Button("Cancel", role: .cancel) { renameId = nil }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { AutonomyToggle().environmentObject(client) }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -410,7 +428,7 @@ private struct ThreadRow: View {
             HStack(spacing: 11) {
                 Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(T.accent2).frame(width: 22)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(t.project).font(.claude(15, .semibold)).foregroundColor(T.text).lineLimit(1)
+                    Text(t.displayName).font(.claude(15, .semibold)).foregroundColor(T.text).lineLimit(1)
                     Text(t.messages.last?.text ?? "—").font(.claude(11)).foregroundColor(T.subtext).lineLimit(1)
                 }
                 Spacer(minLength: 6)
@@ -580,8 +598,11 @@ private struct ThinkingRow: View {
 
 // MARK: - Markdown renderer (block-level)
 
-private enum MDBlock { case heading(Int, String), paragraph(String), bullets([String]),
-                       numbered([(String, String)]), code(String, String), quote(String), rule, tool(String) }
+private enum MDBlock { case heading(Int, String), paragraph(String)
+                       case bullets([(Int, String)])           // (depth, text) — supports nesting
+                       case numbered([(Int, String, String)])  // (depth, number, text)
+                       case table([String], [[String]])        // headers, rows
+                       case code(String, String), quote(String), rule, tool(String) }
 
 private struct MarkdownView: View {
     let text: String
@@ -607,22 +628,46 @@ private struct MarkdownView: View {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                     HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Text("•").font(.claude(15)).foregroundColor(T.accent)
-                        Text(inlineMD(it)).foregroundColor(T.text).lineSpacing(2.5)
+                        Text(it.0 == 0 ? "•" : "◦").font(.claude(15)).foregroundColor(T.accent)
+                        Text(inlineMD(it.1)).foregroundColor(T.text).lineSpacing(2.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    .padding(.leading, CGFloat(it.0) * 16)
                 }
             }
         case .numbered(let items):
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                     HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Text(it.0 + ".").font(.claude(14.5, .semibold)).foregroundColor(T.accent)
+                        Text(it.1 + ".").font(.claude(14.5, .semibold)).foregroundColor(T.accent)
                             .frame(minWidth: 19, alignment: .trailing)
-                        Text(inlineMD(it.1)).foregroundColor(T.text).lineSpacing(2.5)
+                        Text(inlineMD(it.2)).foregroundColor(T.text).lineSpacing(2.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    .padding(.leading, CGFloat(it.0) * 16)
                 }
+            }
+        case .table(let headers, let rows):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
+                    GridRow {
+                        ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
+                            Text(inlineMD(h, size: 13.5, weight: .bold)).foregroundColor(T.text)
+                        }
+                    }
+                    if !rows.isEmpty { Divider().background(T.border).gridCellColumns(max(headers.count, 1)) }
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
+                        GridRow {
+                            ForEach(Array(r.enumerated()), id: \.offset) { _, c in
+                                Text(inlineMD(c, size: 13.5)).foregroundColor(T.text)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .padding(11)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(T.card))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(T.border, lineWidth: 1))
             }
         case .code(let lang, let body):
             CodeBlock(lang: lang, code: body)
@@ -691,8 +736,24 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
     let lines = text.components(separatedBy: "\n")
     var i = 0
     func trimmed(_ n: Int) -> String { lines[n].trimmingCharacters(in: .whitespaces) }
+    // Leading-whitespace depth for nested lists (2 spaces or 1 tab per level, capped).
+    func depth(_ n: Int) -> Int {
+        var spaces = 0
+        for ch in lines[n] { if ch == " " { spaces += 1 } else if ch == "\t" { spaces += 2 } else { break } }
+        return min(spaces / 2, 4)
+    }
     while i < lines.count {
         let line = trimmed(i)
+        // GitHub table: a `| … |` header immediately followed by a `|---|---|` delimiter row.
+        if line.contains("|"), i + 1 < lines.count, isTableDelimiter(trimmed(i + 1)) {
+            let headers = tableCells(line)
+            i += 2
+            var rows: [[String]] = []
+            while i < lines.count, !trimmed(i).isEmpty, trimmed(i).contains("|") {
+                rows.append(tableCells(trimmed(i))); i += 1
+            }
+            blocks.append(.table(headers, rows)); continue
+        }
         if line.hasPrefix("```") {                                   // fenced code (robust to unclosed during streaming)
             let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
             var body: [String] = []; i += 1
@@ -719,14 +780,14 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
             }
             blocks.append(.quote(q.joined(separator: "\n"))); continue
         }
-        if isBullet(line) {                                           // bullet list
-            var items: [String] = []
-            while i < lines.count && isBullet(trimmed(i)) { items.append(bulletText(trimmed(i))); i += 1 }
+        if isBullet(line) {                                           // bullet list (with nesting depth)
+            var items: [(Int, String)] = []
+            while i < lines.count && isBullet(trimmed(i)) { items.append((depth(i), bulletText(trimmed(i)))); i += 1 }
             blocks.append(.bullets(items)); continue
         }
-        if numbered(line) != nil {                                    // numbered list
-            var items: [(String, String)] = []
-            while i < lines.count, let n = numbered(trimmed(i)) { items.append(n); i += 1 }
+        if numbered(line) != nil {                                    // numbered list (with nesting depth)
+            var items: [(Int, String, String)] = []
+            while i < lines.count, let n = numbered(trimmed(i)) { items.append((depth(i), n.0, n.1)); i += 1 }
             blocks.append(.numbered(items)); continue
         }
         if line.isEmpty { i += 1; continue }
@@ -734,7 +795,8 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
         while i < lines.count {
             let l = trimmed(i)
             if l.isEmpty || l.hasPrefix("```") || l.hasPrefix("#") || l.hasPrefix(">") || l.hasPrefix("⚙ ")
-                || isBullet(l) || numbered(l) != nil || l == "---" || l == "***" || l == "___" { break }
+                || isBullet(l) || numbered(l) != nil || l == "---" || l == "***" || l == "___"
+                || (l.contains("|") && i + 1 < lines.count && isTableDelimiter(trimmed(i + 1))) { break }
             para.append(lines[i]); i += 1
         }
         if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))) }
@@ -746,6 +808,21 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
 
 private func isBullet(_ s: String) -> Bool {
     (s.hasPrefix("- ") || s.hasPrefix("* ") || s.hasPrefix("+ ")) && s.count > 2
+}
+/// A GitHub table delimiter row, e.g. "|---|:--:|" or "--- | ---". Requires a pipe so a
+/// bare "---" thematic break (after a line that merely contains a pipe) isn't misread as one.
+private func isTableDelimiter(_ s: String) -> Bool {
+    guard s.contains("-"), s.contains("|") else { return false }
+    let body = s.trimmingCharacters(in: CharacterSet(charactersIn: "| "))
+    guard !body.isEmpty else { return false }
+    return body.allSatisfy { $0 == "-" || $0 == ":" || $0 == "|" || $0 == " " }
+}
+/// Split a table row "| a | b |" into trimmed cells, dropping the outer-pipe empties.
+private func tableCells(_ s: String) -> [String] {
+    var cells = s.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+    if let f = cells.first, f.isEmpty { cells.removeFirst() }
+    if let l = cells.last, l.isEmpty { cells.removeLast() }
+    return cells
 }
 private func bulletText(_ s: String) -> String { String(s.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
 private func numbered(_ s: String) -> (String, String)? {

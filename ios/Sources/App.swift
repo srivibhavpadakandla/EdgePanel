@@ -51,10 +51,16 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
         Task { @MainActor in EdgeClient.shared.postPushToken(kind: "device", sessionId: nil, pushToken: hex) }
     }
 
-    // Show permission/done banners even when the app is in the foreground.
+    // While the app is foreground, the in-app cards + Dynamic Island already show every
+    // permission / question / "done" event, so suppress the REMOTE APNs duplicate (which iOS
+    // would otherwise surface as a second banner the moment the Mac pushes). Local
+    // notifications (usage thresholds / forecast — trigger == nil) still banner, since those
+    // have no on-screen equivalent. Backgrounded/closed pushes never hit willPresent, so this
+    // can't suppress alerts when you actually need them.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        let isRemote = notification.request.trigger is UNPushNotificationTrigger
+        completionHandler(isRemote ? [] : [.banner, .sound])
     }
 
     // Allow / Deny tapped on a permission notification → resolve it on the Mac.

@@ -40,9 +40,10 @@ struct WorkingLiveActivity: Widget {
                             Label("done", systemImage: "checkmark.circle.fill").foregroundColor(olive)
                                 .font(.system(size: 13, weight: .semibold))
                         } else if let p = s.primary {
-                            Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
+                            Text(p.start, style: .timer)
                                 .font(.system(size: 15, weight: .semibold, design: .monospaced))
                                 .foregroundColor(olive).monospacedDigit()
+                                .lineLimit(1).minimumScaleFactor(0.6)
                                 .frame(maxWidth: 62, alignment: .trailing)
                         }
                     }.padding(.trailing, 4)
@@ -78,12 +79,12 @@ struct WorkingLiveActivity: Widget {
                 if s.done {
                     Image(systemName: "checkmark").foregroundColor(olive)
                 } else if let p = s.primary {
-                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
+                    Text(p.start, style: .timer)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                        .foregroundColor(olive).monospacedDigit().frame(maxWidth: 50)
+                        .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 56)
                 }
             } minimal: {
-                BirdBadge(state: s)
+                BirdBadge(state: s, minimal: true)
             }
             // Green keyline on completion — animates with the working→done push so the
             // Island visibly flashes "complete" before it's torn down on `end`.
@@ -95,6 +96,7 @@ struct WorkingLiveActivity: Widget {
 /// Bird icon with a small count badge when more than one prompt is running.
 private struct BirdBadge: View {
     let state: WorkingAttributes.ContentState
+    var minimal: Bool = false   // the minimal slot is a tiny circle → glyph only, no count badge
     var body: some View {
         // Fixed-size glyph + the count as an OVERLAY (doesn't expand layout bounds), so
         // the compact Dynamic Island slot sizes to the bird and never clips it. The old
@@ -104,7 +106,7 @@ private struct BirdBadge: View {
             .foregroundColor(state.done ? olive : clay)
             .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
             .overlay(alignment: .topTrailing) {
-                if !state.done && state.count > 1 {
+                if !minimal && !state.done && state.count > 1 {
                     Text(state.count > 9 ? "9+" : "\(state.count)")
                         .font(.system(size: 8, weight: .bold)).foregroundColor(.black)
                         .padding(.horizontal, 2).frame(minHeight: 11)
@@ -129,9 +131,9 @@ private struct SessionRow: View {
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(timerInterval: s.start...s.freezeEnd, countsDown: false)
+                Text(s.start, style: .timer)
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundColor(olive).monospacedDigit().frame(maxWidth: 54, alignment: .trailing)
+                    .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 58, alignment: .trailing)
                 Text(s.tokens == 0 ? "starting…" : "\(fmtTok(s.tokens)) tok")
                     .font(.system(size: 10)).foregroundColor(.gray)
             }
@@ -154,9 +156,9 @@ struct LockScreenView: View {
                 if state.done {
                     Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundColor(olive)
                 } else if let p = state.primary {
-                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
+                    Text(p.start, style: .timer)
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                        .foregroundColor(olive).monospacedDigit().frame(maxWidth: 70, alignment: .trailing)
+                        .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 74, alignment: .trailing)
                 }
             }
             if state.done {
