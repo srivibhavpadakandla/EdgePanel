@@ -31,6 +31,7 @@ final class ChatStore: ObservableObject {
     @Published var threads: [ChatThread] = []
     @Published var busy: Set<String> = []        // thread ids awaiting a reply
     @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop)
+    private var stopping: Set<String> = []           // threads the user asked to stop (streamJob bails next tick)
 
     private let url: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -64,6 +65,10 @@ final class ChatStore: ObservableObject {
             let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: cwd)
             guard !hist.isEmpty, !busy.contains(threadId),
                   let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
+            // Don't clobber with a SHORTER transcript: a turn that just finished (or a
+            // local-only error/"Stopped" bubble) can leave the device ahead of the
+            // server's lagging JSONL — replacing then would drop the newest messages.
+            guard hist.count >= threads[i].messages.count else { return }
             threads[i].messages = hist.map {
                 ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text)
             }
@@ -88,9 +93,34 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Stop the running turn — terminates the `claude` process on the Mac.
+    /// Resend the last user message after a failed turn: drop trailing error/"Stopped"
+    /// bubbles, then re-run that prompt. No-op if the thread is busy or has no user turn.
+    func retryLast(_ threadId: String) {
+        guard !busy.contains(threadId), let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
+        while threads[i].messages.last?.role == .error { threads[i].messages.removeLast() }
+        guard let lastUser = threads[i].messages.last(where: { $0.role == .user })?.text else { return }
+        // Strip everything after that user turn (a partial assistant reply) so the resend is clean.
+        if let lu = threads[i].messages.lastIndex(where: { $0.role == .user }) {
+            threads[i].messages.removeSubrange((lu + 1)...)
+        }
+        threads[i].messages.removeLast()   // send() re-appends the user bubble
+        send(threadId, lastUser)
+    }
+
+    /// Stop the running turn — terminates the `claude` process on the Mac AND settles
+    /// the thread locally right away, so the UI never sits stuck "thinking" if the
+    /// cancel races the poll or the Mac is briefly unreachable. streamJob sees
+    /// `stopping` and bails on its next tick without overwriting the stopped state.
     func stop(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }
+        stopping.insert(id)
+        busy.remove(id); busyJob[id] = nil
+        if let i = threads.firstIndex(where: { $0.id == id }),
+           threads[i].messages.last?.role != .assistant {
+            // Nothing streamed yet → leave a clear marker instead of a silent stop.
+            threads[i].messages.append(ChatMessage(role: .error, text: "■ Stopped"))
+        }
+        save()
     }
 
     /// Start a BRAND-NEW autonomous task in `cwd`. The thread keeps a stable id and
@@ -120,6 +150,7 @@ final class ChatStore: ObservableObject {
         var streamId: UUID?, fails = 0
         for _ in 0..<1400 {                       // ~12 min at 0.5s
             try? await Task.sleep(nanoseconds: 500_000_000)
+            if stopping.contains(threadId) { stopping.remove(threadId); return }   // user hit Stop → already settled
             guard let job = await EdgeClient.shared.pollChat(jobId) else {
                 fails += 1                        // unreachable Mac → don't hang busy forever
                 if fails >= 20 { finalize(threadId, streamId, "Lost connection to your Mac.", .error); busyJob[threadId] = nil; return }
@@ -268,10 +299,17 @@ struct ChatListView: View {
 private struct AutonomyToggle: View {
     @EnvironmentObject var client: EdgeClient
     @State private var pending: Bool?      // optimistic flip until the snapshot reconciles
+    @State private var reconcile: Task<Void, Never>?
     private var on: Bool { pending ?? client.snapshot?.autoApprove ?? false }
     var body: some View {
         Button {
             let next = !on; pending = next; client.setAutoApprove(next)   // flip instantly
+            // Fall back to server truth after a moment — covers the case where the
+            // snapshot already equals `next` (onChange wouldn't fire) or the Mac never
+            // confirms, so the toggle can't get wedged showing a stale optimistic value.
+            reconcile?.cancel()
+            reconcile = Task { try? await Task.sleep(nanoseconds: 4_000_000_000)
+                               if !Task.isCancelled { pending = nil } }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: on ? "bolt.fill" : "bolt.slash.fill")
@@ -293,6 +331,7 @@ struct NewTaskSheet: View {
     @State private var projects: [EdgeClient.Project] = []
     @State private var picked: EdgeClient.Project?
     @State private var task = ""
+    @State private var loaded = false      // distinguish "still loading" from "loaded, none found"
     @FocusState private var focused: Bool
 
     private var canStart: Bool { picked != nil && !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -304,8 +343,16 @@ struct NewTaskSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         Text("PROJECT").font(.claude(11, .semibold)).foregroundColor(T.subtext)
-                        if projects.isEmpty {
+                        if !loaded {
                             HStack { ProgressView().tint(T.accent); Text("Loading projects…").font(.claude(12)).foregroundColor(T.subtext) }
+                        } else if projects.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("No projects found — is EdgePanel running on your Mac?")
+                                    .font(.claude(12)).foregroundColor(T.subtext)
+                                Button { Task { await loadProjects() } } label: {
+                                    Label("Retry", systemImage: "arrow.clockwise").font(.claude(12, .semibold))
+                                }.tint(T.accent)
+                            }
                         }
                         ForEach(projects) { p in
                             Button { picked = p } label: {
@@ -342,9 +389,16 @@ struct NewTaskSheet: View {
                     }.disabled(!canStart)
                 }
             }
-            .task { projects = await client.fetchProjects(); if picked == nil { picked = projects.first } }
+            .task { await loadProjects() }
         }
         .tint(T.accent)
+    }
+
+    private func loadProjects() async {
+        loaded = false
+        projects = await client.fetchProjects()
+        if picked == nil { picked = projects.first }
+        loaded = true
     }
 }
 
@@ -402,7 +456,7 @@ struct ChatThreadView: View {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: messages.last?.text) { _, _ in if atBottom { scrollToBottom(proxy) } }
-                    .onChange(of: messages.count) { _, _ in scrollToBottom(proxy) }
+                    .onChange(of: messages.count) { _, _ in if atBottom { scrollToBottom(proxy) } }
                     .onChange(of: thinking) { _, t in if t { scrollToBottom(proxy) } }
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom && !messages.isEmpty {
@@ -414,6 +468,14 @@ struct ChatThreadView: View {
                             }.padding(.trailing, 14).padding(.bottom, 8)
                         }
                     }
+                }
+                if !busy, messages.last?.role == .error {
+                    Button { store.retryLast(sessionId) } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .font(.claude(13, .semibold)).foregroundColor(T.accent)
+                            .frame(maxWidth: .infinity).padding(.vertical, 9)
+                            .background(RoundedRectangle(cornerRadius: 11).fill(T.accent.opacity(0.12)))
+                    }.padding(.horizontal, 16).padding(.bottom, 4)
                 }
                 composer
             }
@@ -479,7 +541,7 @@ private struct MessageView: View {
         case .error:
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundColor(T.red)
-                Text(message.text).font(.claude(14)).foregroundColor(T.red)
+                Text(message.text).font(.claude(14)).foregroundColor(T.red).textSelection(.enabled)
             }
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 12).fill(T.red.opacity(0.10)))

@@ -191,16 +191,6 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
-    /// Interrupt the turn running in the live editor session (Escape).
-    func interruptLive(sessionId: String) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/interrupt") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 6)
-        req.httpMethod = "POST"
-        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": sessionId])
-        Task { _ = try? await URLSession.shared.data(for: req) }
-    }
-
     /// Load a session's real conversation history from the Mac transcript.
     func fetchHistory(sessionId: String, cwd: String) async -> [(role: String, text: String)] {
         guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/history") else { return [] }

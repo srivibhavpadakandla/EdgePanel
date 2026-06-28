@@ -194,7 +194,9 @@ final class ActivityManager {
         // proactive heads-up with the projected time (re-arms when the pace eases).
         if let hit = plan?.limitClockEpoch {
             let mins = Date(timeIntervalSince1970: hit).timeIntervalSinceNow / 60
-            if mins > 0, mins <= 45, !forecastAlerted {
+            // Floor: only forecast once you're actually deep into the window (≥50%), so a
+            // noisy early projection right after a window reset can't fire a false alarm.
+            if mins > 0, mins <= 45, pct >= 50, !forecastAlerted {
                 forecastAlerted = true
                 let t = DateFormatter.localizedString(from: Date(timeIntervalSince1970: hit), dateStyle: .none, timeStyle: .short)
                 notify(title: "⏳ On track to hit your 5-hour cap", body: "At this pace, around \(t). Ease off or pause autonomous tasks.")
