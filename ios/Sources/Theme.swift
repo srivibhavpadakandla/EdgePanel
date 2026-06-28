@@ -9,8 +9,10 @@ extension Color {
 }
 
 enum T {  // EdgePanel dark theme (matches the macOS panel)
-    static let bg = Color(hex: 0x16150F)
+    static let bg = Color(hex: 0x14130E)
     static let card = Color(hex: 0x201F1C)
+    static let cardTop = Color(hex: 0x26241F)   // top of the card's lit gradient
+    static let cardBot = Color(hex: 0x1B1A16)   // bottom of the card's lit gradient
     static let accentSoft = Color(hex: 0x342A22)
     static let text = Color(hex: 0xF3EFE6)
     static let subtext = Color(hex: 0x9C968C)
@@ -22,6 +24,19 @@ enum T {  // EdgePanel dark theme (matches the macOS panel)
     static let amber = Color(hex: 0xD9A24E)
     static let red = Color(hex: 0xD05A4E)
     static let heat = [Color(hex: 0x2C2B27), Color(hex: 0xB6CE8A), Color(hex: 0x88AC5A), Color(hex: 0x57813A), Color(hex: 0x2E5220)]
+
+    // A reusable "lit from above" card surface: top-lit gradient fill + a gradient
+    // hairline (brighter at the top edge) + a soft drop shadow for real elevation.
+    static func surface(_ radius: CGFloat = 18) -> some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(LinearGradient(colors: [cardTop, cardBot], startPoint: .top, endPoint: .bottom))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0.025)],
+                                                 startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.38), radius: 11, x: 0, y: 5)
+    }
 }
 
 extension Font {
@@ -44,15 +59,14 @@ func fmtTokens(_ t: Int) -> String {
 }
 func prettyModel(_ m: String?) -> String { m ?? "Claude" }
 
-// A bordered card container.
+// A bordered card container with real elevation (lit-from-above surface).
 struct Card<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         content
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 16).fill(T.card))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(T.border, lineWidth: 1))
+            .background(T.surface(18))
     }
 }
 

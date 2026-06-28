@@ -113,7 +113,8 @@ struct UsageTab: View {
         NavigationStack {
             ZStack {
                 T.bg.ignoresSafeArea()
-                ScrollView { Dashboard().padding(16) }
+                ScrollView { Dashboard().padding(16).padding(.bottom, 28) }
+                    .scrollIndicators(.hidden)
             }
             .safeAreaInset(edge: .top) { header }
             .toolbar(.hidden, for: .navigationBar)
@@ -164,29 +165,46 @@ struct PlanCard: View {
     let plan: EdgeSnapshot.PlanInfo
     var body: some View {
         let frac = min(max(plan.fiveHourPct / 100, 0), 1)
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("\(Int(plan.fiveHourPct.rounded()))%").font(.claude(38, .bold)).foregroundColor(T.text)
-                    Spacer()
-                    Text("CURRENT").font(.claude(12, .medium)).foregroundColor(T.text)
-                        .padding(.horizontal, 12).padding(.vertical, 5)
-                        .background(Capsule().fill(T.track))
+        let sev = sevColor(frac)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(Int(plan.fiveHourPct.rounded()))").font(.claude(46, .bold)).foregroundColor(T.text)
+                Text("%").font(.claude(24, .bold)).foregroundColor(T.text.opacity(0.55))
+                Spacer()
+                HStack(spacing: 5) {
+                    Circle().fill(sev).frame(width: 6, height: 6)
+                    Text("5-HOUR").font(.claude(11, .semibold)).tracking(0.8).foregroundColor(T.text.opacity(0.85))
                 }
-                Bar(frac: frac, color: sevColor(frac))
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(Capsule().fill(Color.black.opacity(0.22)))
+            }
+            Bar(frac: frac, color: sev, height: 11)
+            HStack(spacing: 8) {
                 if let reset = plan.fiveHourResetEpoch {
                     let rem = max(reset - Date().timeIntervalSince1970, 0)
-                    Text("resets in \(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m")
-                        .font(.claude(13)).foregroundColor(T.subtext)
+                    Label("resets in \(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m", systemImage: "arrow.clockwise")
+                        .font(.claude(12.5)).foregroundColor(T.subtext)
                 }
+                Spacer()
                 if let burn = plan.burnPerHour, burn >= 0.5 {
-                    let clock = plan.limitClockEpoch.map { "limit ~\(timeStr($0))" }
-                    Text("\(clock.map { "\($0) · " } ?? "")+\(Int(burn.rounded()))%/hr")
-                        .font(.claude(13, .medium)).foregroundColor(plan.limitClockEpoch != nil ? T.red : T.subtext)
+                    let clock = plan.limitClockEpoch.map { "~\(timeStr($0))" }
+                    Label("\(clock.map { "\($0) · " } ?? "")+\(Int(burn.rounded()))%/hr", systemImage: "flame.fill")
+                        .font(.claude(12.5, .medium)).foregroundColor(plan.limitClockEpoch != nil ? T.red : T.amber)
                 }
             }
         }
-        .background(RoundedRectangle(cornerRadius: 16).fill(T.accentSoft))
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(LinearGradient(colors: [Color(hex: 0x302720), Color(hex: 0x211C18)], startPoint: .top, endPoint: .bottom))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [T.accent.opacity(0.30), Color.white.opacity(0.03)],
+                                                     startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.42), radius: 13, x: 0, y: 6)
+        )
     }
 }
 
@@ -346,7 +364,12 @@ struct WorkingCard: View {
                     ForEach(working) { w in
                         NavigationLink {
                             ChatThreadView(sessionId: w.id, project: w.project, cwd: w.cwd)
-                        } label: { WorkingRow(w: w) }.buttonStyle(.plain)
+                        } label: {
+                            WorkingRow(w: w)
+                                .padding(12)
+                                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(T.green.opacity(0.06)))
+                                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(T.green.opacity(0.16), lineWidth: 1))
+                        }.buttonStyle(.plain)
                     }
                 }
             }
@@ -359,7 +382,7 @@ struct WorkingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 9) {
-                Circle().fill(T.green).frame(width: 8, height: 8)
+                PulsingDot()
                 Text(w.project).font(.claude(15, .semibold)).foregroundColor(T.text)
                 Spacer()
                 Image(systemName: "clock").font(.system(size: 10)).foregroundColor(T.green)
@@ -395,6 +418,22 @@ struct WorkingRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A live "radar ping" dot — solid core + an expanding, fading ring.
+struct PulsingDot: View {
+    var color: Color = T.green
+    @State private var animate = false
+    var body: some View {
+        ZStack {
+            Circle().fill(color.opacity(0.4)).frame(width: 9, height: 9)
+                .scaleEffect(animate ? 2.6 : 1).opacity(animate ? 0 : 0.7)
+            Circle().fill(color).frame(width: 9, height: 9)
+        }
+        .frame(width: 9, height: 9)
+        .animation(.easeOut(duration: 1.5).repeatForever(autoreverses: false), value: animate)
+        .onAppear { animate = true }
     }
 }
 
@@ -543,13 +582,17 @@ struct CalendarCard: View {
 
 struct Bar: View {
     let frac: Double; let color: Color
+    var height: CGFloat = 10
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(T.track).frame(height: 8)
-                Capsule().fill(color).frame(width: max(8, geo.size.width * min(max(frac, 0), 1)), height: 8)
+                Capsule().fill(T.track)
+                Capsule()
+                    .fill(LinearGradient(colors: [color.opacity(0.85), color], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: max(height, geo.size.width * min(max(frac, 0), 1)))
+                    .shadow(color: color.opacity(0.45), radius: 5, y: 1)   // subtle glow on the fill
             }
-        }.frame(height: 8)
+        }.frame(height: height)
     }
 }
 
