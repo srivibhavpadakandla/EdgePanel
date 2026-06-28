@@ -10,3 +10,4 @@ ios/build/
 # Secrets (APNs auth key lives in ~/.edgepanel, never here)
 *.p8
 .edgepanel/
+ios/build-sim/
