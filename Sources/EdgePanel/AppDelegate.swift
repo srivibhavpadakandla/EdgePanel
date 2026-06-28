@@ -228,7 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       let jid = obj["jobId"] as? String else {
                     return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
                 }
-                let job = ChatRunner.shared.poll(jid) ?? ChatRunner.Job(status: "error", error: "unknown job")
+                // "gone" (not "error") for an unknown job — the Mac may have restarted or
+                // evicted the finished job; the phone treats this as "recover the reply from
+                // the session transcript" rather than surfacing a scary error.
+                let job = ChatRunner.shared.poll(jid) ?? ChatRunner.Job(status: "gone")
                 let data = (try? JSONEncoder().encode(job)) ?? Data("{}".utf8)
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             }
