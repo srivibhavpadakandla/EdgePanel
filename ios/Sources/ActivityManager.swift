@@ -89,8 +89,12 @@ final class ActivityManager {
     }
 
     /// Reconcile the aggregate Live Activity with the current working sessions.
-    func sync(working: [EdgeSnapshot.Working]) {
+    func sync(working rawWorking: [EdgeSnapshot.Working]) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        // The Dynamic Island tracks remote/non-editor work only — an editor session you're
+        // watching at the Mac would keep it alive forever (it'd "never stop"). The WORKING
+        // NOW card still shows everything; this filter is just for the persistent Island.
+        let working = rawWorking.filter { !$0.isEditor }
         // Adopt an activity the Mac push-started while we were closed, so we drive the
         // same one (update/end) instead of creating a duplicate.
         if aggregate == nil,

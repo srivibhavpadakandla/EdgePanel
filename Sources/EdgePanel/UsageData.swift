@@ -437,6 +437,7 @@ struct LiveSession: Identifiable {
     let turnComplete: Bool    // the latest assistant turn ended (stop_reason end_turn)
     var runningAgents: Int = 0  // in-flight Task subagents this turn (tool_use w/o a tool_result yet)
     var queuedPrompts: Int = 0  // prompts you typed while this turn runs, waiting their turn
+    var isEditor: Bool = false  // a GUI editor session (claude-vscode/desktop) you're watching → excluded from the Island
     /// Still generating: you prompted and the turn hasn't finished (no end_turn
     /// yet — covers long tool calls), and the transcript is recent enough not to
     /// be an abandoned/crashed turn.
@@ -477,6 +478,10 @@ extension UsageLoader {
             // chats, so counting them spammed WORKING NOW + a "finished" notification for
             // work you never started.
             if objs.contains(where: { ($0["entrypoint"] as? String) == "sdk-cli" }) { continue }
+            // A GUI editor session you're physically watching (claude-vscode / claude-desktop)
+            // shouldn't drive the phone's persistent Dynamic Island — you're at the Mac and it
+            // would never "stop" while you work. It still appears in WORKING NOW.
+            let isEditor = objs.contains { ep in ["claude-vscode", "claude-desktop"].contains(ep["entrypoint"] as? String) }
 
             // The current turn = everything after your last *typed* prompt.
             // userPromptText() skips tool_result continuations and Claude Code's
@@ -577,7 +582,7 @@ extension UsageLoader {
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
                                    cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
-                                   runningAgents: runningAgents, queuedPrompts: queuedPrompts))
+                                   runningAgents: runningAgents, queuedPrompts: queuedPrompts, isEditor: isEditor))
         }
         return out
     }

@@ -418,8 +418,12 @@ final class EdgePanelState: ObservableObject {
     /// Island ends/updates seamlessly even when the app is suspended or fully closed.
     /// Push on membership change, AND every ~12s while running so the token counts
     /// refresh on the Lock Screen (tokens don't self-tick like the timer does).
-    func pushAggregate(working: [LiveSession]) {
+    func pushAggregate(working rawWorking: [LiveSession]) {
         guard APNsPusher.shared.enabled else { return }
+        // Editor sessions you're physically watching never drive the Island (it'd never stop
+        // while you work at the Mac) — only remote/non-editor work does, so the Island ends
+        // when THAT finishes even if your editor session is still going.
+        let working = rawWorking.filter { !$0.isEditor }
         let ids = Set(working.map { $0.id })
         let membershipChanged = ids != lastPushedWorkingIds
 
