@@ -23,7 +23,7 @@ final class PromptSummarizer {
     /// A cached short label, or nil while one is computed. `onReady` fires on the
     /// main thread when the async summary lands.
     func shortLabel(for prompt: String, onReady: @escaping (String) -> Void) -> String? {
-        let key = String(prompt.hashValue)
+        let key = prompt   // exact key — no hash collisions, no per-process-randomized hashValue
         lock.lock()
         if let s = cache[key] { lock.unlock(); return s }
         if inflight.contains(key) { lock.unlock(); return nil }

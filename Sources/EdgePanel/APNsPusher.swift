@@ -48,11 +48,17 @@ final class APNsPusher: @unchecked Sendable {
         guard let config else { return }
         var aps: [String: Any] = ["timestamp": Int(Date().timeIntervalSince1970),
                                   "event": event, "content-state": contentState]
+        // Keep an `update` fresh (not coalesced away as redundant) through the brief
+        // window before the matching `end` lands.
+        if event == "update" { aps["stale-date"] = Int(Date().addingTimeInterval(600).timeIntervalSince1970) }
         // Show the "done" screen briefly, then auto-dismiss.
         if event == "end" { aps["dismissal-date"] = Int(Date().addingTimeInterval(6).timeIntervalSince1970) }
         if let alert { aps["alert"] = alert }
+        // Apple throttles frequent priority-10 content updates — routine "update" pushes
+        // go at priority 5; "end" (and the one-off alert it carries) stay at 10.
         send(token: token, payload: ["aps": aps],
-             topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity")
+             topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity",
+             priority: event == "update" ? 5 : 10)
     }
 
     /// Push-to-start (iOS 17.2+): create the Live Activity even when the app isn't
@@ -89,7 +95,7 @@ final class APNsPusher: @unchecked Sendable {
         send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
     }
 
-    private func send(token: String, payload: [String: Any], topic: String, pushType: String) {
+    private func send(token: String, payload: [String: Any], topic: String, pushType: String, priority: Int = 10) {
         let host = config?.host ?? "api.sandbox.push.apple.com"
         guard let url = URL(string: "https://\(host)/3/device/\(token)"),
               let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
@@ -99,7 +105,7 @@ final class APNsPusher: @unchecked Sendable {
         req.setValue("bearer \(jwt())", forHTTPHeaderField: "authorization")
         req.setValue(topic, forHTTPHeaderField: "apns-topic")
         req.setValue(pushType, forHTTPHeaderField: "apns-push-type")
-        req.setValue("10", forHTTPHeaderField: "apns-priority")
+        req.setValue("\(priority)", forHTTPHeaderField: "apns-priority")
         URLSession.shared.dataTask(with: req) { data, resp, err in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             if code == 200 {

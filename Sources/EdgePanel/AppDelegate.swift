@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
 
+        // Restore push tokens persisted from before a restart, so the Mac can still push
+        // the Island's "end" (otherwise it'd stay frozen on a stuck timer after a relaunch).
+        state.loadPushTokens()
         store.start()
         let view = EdgeUsageView(store: store, state: state)
         let controller = EdgePanelController(rootView: view)
@@ -132,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return nil
             }()
-            guard (headerTok ?? queryTok) == token else {
+            guard Self.constantTimeEqual(headerTok ?? queryTok, token) else {
                 return HTTPResponse(status: 401, headers: ["Content-Type": "application/json"],
                                     body: Data("{\"error\":\"unauthorized\"}".utf8))
             }
@@ -191,12 +194,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let cwd = obj["cwd"] as? String ?? ""
                 let sid = obj["sessionId"] as? String
-                guard let jid = ChatRunner.shared.start(cwd: cwd, sessionId: sid, message: msg) else {
+                // Always run a reliable streaming `claude -p [--resume]` turn — the reply
+                // streams straight back to the phone. (The fragile "type into the live VS
+                // Code chat" path was removed: Electron honors synthetic keystrokes too
+                // inconsistently to depend on.)
+                switch ChatRunner.shared.start(cwd: cwd, sessionId: sid, message: msg) {
+                case .started(let jid):
+                    return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                        body: Data("{\"jobId\":\"\(jid)\"}".utf8))
+                case .busy:
+                    return HTTPResponse(status: 409, headers: ["Content-Type": "application/json"],
+                                        body: Data("{\"error\":\"a turn is already running for this chat\"}".utf8))
+                case .unavailable:
                     return HTTPResponse(status: 503, headers: ["Content-Type": "application/json"],
                                         body: Data("{\"error\":\"claude CLI not found on the Mac\"}".utf8))
                 }
-                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
-                                    body: Data("{\"jobId\":\"\(jid)\"}".utf8))
             }
             // Load a session's real conversation (your prompts + Claude's replies),
             // so the phone shows the actual chat history from your Mac. Body:{sessionId,cwd?}.
@@ -220,16 +232,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let data = (try? JSONEncoder().encode(job)) ?? Data("{}".utf8)
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             }
+            // Recent projects to start a NEW autonomous task in (project picker on the phone).
+            if request.method == "GET", path == "/projects" {
+                let projs = UsageLoader.recentProjects()
+                let arr = projs.map { ["name": $0.name, "cwd": $0.cwd] }
+                let data = (try? JSONSerialization.data(withJSONObject: ["projects": arr])) ?? Data("{\"projects\":[]}".utf8)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            }
+            // Stop a running chat turn from the phone. Body: {jobId}.
+            if request.method == "POST", path == "/chat/cancel" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let jid = obj["jobId"] as? String else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let ok = ChatRunner.shared.cancel(jid)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                    body: Data("{\"stopped\":\(ok)}".utf8))
+            }
+            // PANIC STOP: kill all running turns + Autonomous off + deny held/incoming.
+            if request.method == "POST", path == "/panic" {
+                let killed = await MainActor.run { state.panic() }
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                    body: Data("{\"killed\":\(killed)}".utf8))
+            }
+            // Toggle Autonomous (auto-approve) mode. Body: {on: bool}.
+            if request.method == "POST", path == "/automode" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let on = obj["on"] as? Bool else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                await MainActor.run { state.setAutoApprove(on) }
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
+                                    body: Data("{\"autoApprove\":\(on)}".utf8))
+            }
             return .notFound()
         }
         do {
             try server.start()
-            NSLog("EdgePanel LAN bridge → http://\(Self.lanIP()):\(port)/snapshot  (token: \(token))")
+            NSLog("EdgePanel LAN bridge → http://\(Self.lanIP()):\(port)/snapshot  (token: \(Self.redact(token)))")
         } catch {
             NSLog("EdgePanel LAN bridge failed on :\(port): \(error.localizedDescription)")
         }
         self.lanServer = server
     }
+
+    /// Compare the presented token to the secret without an early-out, so response
+    /// time doesn't leak how many leading characters matched (timing side channel).
+    nonisolated private static func constantTimeEqual(_ a: String?, _ b: String) -> Bool {
+        guard let a else { return false }
+        let x = Array(a.utf8), y = Array(b.utf8)
+        var diff = x.count ^ y.count
+        for i in 0..<max(x.count, y.count) {
+            diff |= Int(i < x.count ? x[i] : 0) ^ Int(i < y.count ? y[i] : 0)
+        }
+        return diff == 0
+    }
+
+    /// Redact a secret for logging — show only a short prefix.
+    nonisolated private static func redact(_ s: String) -> String { s.isEmpty ? "—" : "\(s.prefix(8))…" }
 
     /// Best-effort primary LAN IPv4 (en0/en1), for the pairing log.
     private static func lanIP() -> String {

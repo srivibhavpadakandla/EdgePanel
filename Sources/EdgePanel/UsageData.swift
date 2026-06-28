@@ -355,7 +355,7 @@ enum UsageLoader {
     /// (input + cache_read + cache_creation ≈ the full prompt currently in context).
     static func activeContext() -> (tokens: Int, model: String, pct: Double, session: String)? {
         let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
         var newest: (url: URL, date: Date)?
         while let u = en.nextObject() as? URL {
             guard u.pathExtension == "jsonl" else { continue }
@@ -380,10 +380,11 @@ enum UsageLoader {
         }
         guard lastInput > 0 else { return nil }
         // The JSONL `model` id doesn't carry the "[1m]" beta tag, so a 1M-context
-        // session looks like a 200K one. But a 200K model would have compacted
-        // before 200K — so anything above ~190K is necessarily long-context.
+        // session looks like a 200K one. A 200K context physically can't exceed 200K
+        // input — so only >200K is a *definitive* 1M signal. At 190–200K it's just a
+        // near-full 200K session (which used to mislabel as "1M · 19%").
         let baseLimit = contextLimit(for: model)
-        let limit = (baseLimit == 200_000 && lastInput > 190_000) ? 1_000_000 : baseLimit
+        let limit = (baseLimit == 200_000 && lastInput > 200_000) ? 1_000_000 : baseLimit
         let pct = min(max(Double(lastInput) / Double(limit), 0), 1)
         let session = pick.url.deletingPathExtension().lastPathComponent
         return (lastInput, model, pct, session)
@@ -402,11 +403,11 @@ struct RecentChat: Identifiable {
     func name(summaries: [String: String]) -> String {
         if let t = title, !t.isEmpty { return t }
         guard let p = firstPrompt, !p.isEmpty, !p.hasPrefix("["), !p.hasPrefix("{") else { return "Chat" }
-        if p.count <= 60 { return p }
+        if p.count <= PromptSummarizer.threshold { return p }
         return summaries[id] ?? (String(p.prefix(56)) + "…")
     }
     /// True when we need the claude CLI to shorten a long, title-less prompt.
-    var needsSummary: Bool { (title?.isEmpty ?? true) && (firstPrompt?.count ?? 0) > 60 }
+    var needsSummary: Bool { (title?.isEmpty ?? true) && (firstPrompt?.count ?? 0) > PromptSummarizer.threshold }
 }
 
 /// One tool call, for the activity feed. Parsed from a transcript `tool_use`.
@@ -434,6 +435,8 @@ struct LiveSession: Identifiable {
     let turnTokens: Int       // billable tokens used so far this turn
     let lastWrite: Date       // transcript mtime
     let turnComplete: Bool    // the latest assistant turn ended (stop_reason end_turn)
+    var runningAgents: Int = 0  // in-flight Task subagents this turn (tool_use w/o a tool_result yet)
+    var queuedPrompts: Int = 0  // prompts you typed while this turn runs, waiting their turn
     /// Still generating: you prompted and the turn hasn't finished (no end_turn
     /// yet — covers long tool calls), and the transcript is recent enough not to
     /// be an abandoned/crashed turn.
@@ -447,11 +450,15 @@ extension UsageLoader {
     /// The view filters to the ones still generating (`isWorking`).
     static func activeSessions(within: TimeInterval = 300, limit: Int = 8) -> [LiveSession] {
         let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         let now = Date()
         var recent: [(url: URL, date: Date)] = []
         while let u = en.nextObject() as? URL {
             guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            // Skip subagent/sidechain transcripts (Task tool, workflow finders, etc.) —
+            // they're named agent-*.jsonl and are NOT real chats. Counting them made
+            // WORKING NOW show "8 chats" and fired a "done" notification for each one.
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
             let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if now.timeIntervalSince(mod) <= within { recent.append((u, mod)) }
         }
@@ -465,6 +472,11 @@ extension UsageLoader {
             guard let text = tailString(u, maxBytes: 6_000_000) else { continue }
             let objs = text.split(separator: "\n", omittingEmptySubsequences: true)
                 .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+            // Skip automated SDK invocations (entrypoint "sdk-cli") — e.g. the Tab Organizer
+            // extension's native host or claude-flow batch jobs. They aren't interactive
+            // chats, so counting them spammed WORKING NOW + a "finished" notification for
+            // work you never started.
+            if objs.contains(where: { ($0["entrypoint"] as? String) == "sdk-cli" }) { continue }
 
             // The current turn = everything after your last *typed* prompt.
             // userPromptText() skips tool_result continuations and Claude Code's
@@ -511,6 +523,40 @@ extension UsageLoader {
             }
             let turnComplete = boundary < 0 || lastTerminalAssistant > boundary
 
+            // Live "proof of work" signals for the current turn:
+            //  • runningAgents = Task subagents spawned this turn whose tool_result hasn't
+            //    come back yet (they're still working).
+            //  • queuedPrompts = prompts you typed since the last finished turn beyond the one
+            //    actually running now (they're waiting in line).
+            // Scan the WHOLE in-flight turn (everything after the last COMPLETED turn), not
+            // just after `boundary` — `boundary` points at the last *queued* prompt, which
+            // sits AFTER the assistant's Task tool_use calls, so scanning from it would miss
+            // the very subagents we're counting.
+            var taskIds = Set<String>(), resolvedIds = Set<String>()
+            let agentScanStart = lastTerminalAssistant + 1
+            if agentScanStart < objs.count {
+                for o in objs[agentScanStart...] {
+                    let type = o["type"] as? String
+                    if type == "assistant", let m = o["message"] as? [String: Any],
+                       let content = m["content"] as? [[String: Any]] {
+                        for b in content where (b["type"] as? String) == "tool_use" && (b["name"] as? String) == "Task" {
+                            if let id = b["id"] as? String { taskIds.insert(id) }
+                        }
+                    } else if type == "user", let m = o["message"] as? [String: Any],
+                              let content = m["content"] as? [[String: Any]] {
+                        for b in content where (b["type"] as? String) == "tool_result" {
+                            if let id = b["tool_use_id"] as? String { resolvedIds.insert(id) }
+                        }
+                    }
+                }
+            }
+            let runningAgents = turnComplete ? 0 : taskIds.subtracting(resolvedIds).count
+            var typedSinceTerminal = 0
+            for (i, o) in objs.enumerated() where i > lastTerminalAssistant {
+                if userPromptText(o) != nil { typedSinceTerminal += 1 }
+            }
+            let queuedPrompts = turnComplete ? 0 : max(0, typedSinceTerminal - 1)
+
             var project = "session"
             var cwdFull = ""
             var model: String?
@@ -530,7 +576,69 @@ extension UsageLoader {
             let resumeCwd = Self.headCwd(u) ?? cwdFull
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
                                    cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
-                                   turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete))
+                                   turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
+                                   runningAgents: runningAgents, queuedPrompts: queuedPrompts))
+        }
+        return out
+    }
+
+    /// The interactive session most recently active (within 10 min) — i.e. the one
+    /// you currently have open in VS Code / Cursor. Used to decide whether a phone
+    /// message should be TYPED INTO the live editor session vs forked via --resume.
+    static func mostRecentInteractiveSessionId() -> String? {
+        let base = projectsBase()
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+        let now = Date()
+        var cands: [(url: URL, id: String, date: Date)] = []
+        while let u = en.nextObject() as? URL {
+            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            let id = u.deletingPathExtension().lastPathComponent
+            if id.hasPrefix("agent-") { continue }
+            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(mod) <= 600 { cands.append((u, id, mod)) }
+        }
+        cands.sort { $0.date > $1.date }
+        for c in cands.prefix(8) where isInteractiveSession(c.url) { return c.id }
+        return nil
+    }
+
+    /// True if the transcript belongs to an interactive editor/CLI session (entrypoint
+    /// present and NOT the automated "sdk-cli"). Cheap head read.
+    private static func isInteractiveSession(_ url: URL) -> Bool {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? fh.close() }
+        let data = (try? fh.read(upToCount: 65536)) ?? Data()
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true).prefix(40) {
+            if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+               let ep = o["entrypoint"] as? String, !ep.isEmpty {
+                return ep != "sdk-cli"
+            }
+        }
+        return false
+    }
+
+    /// Distinct recent project directories (newest first) so the phone can pick where
+    /// to start a brand-new autonomous task. Uses each transcript's CREATION cwd (the
+    /// resumable project dir) and dedupes.
+    static func recentProjects(within: TimeInterval = 60 * 60 * 24 * 45, limit: Int = 30) -> [(name: String, cwd: String)] {
+        let base = projectsBase()
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        let now = Date()
+        var files: [(URL, Date)] = []
+        while let u = en.nextObject() as? URL {
+            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
+            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(mod) <= within { files.append((u, mod)) }
+        }
+        files.sort { $0.1 > $1.1 }
+        var seen = Set<String>(); var out: [(name: String, cwd: String)] = []
+        for (u, _) in files {
+            guard let cwd = headCwd(u), !cwd.isEmpty, !seen.contains(cwd) else { continue }
+            seen.insert(cwd)
+            out.append((name: (cwd as NSString).lastPathComponent, cwd: cwd))
+            if out.count >= limit { break }
         }
         return out
     }
@@ -539,10 +647,11 @@ extension UsageLoader {
     /// from the transcript's `tool_use` blocks — real activity, no hooks needed.
     static func recentActivity(limit: Int = 8) -> [ToolEvent] {
         let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         var newest: (url: URL, date: Date)?
         while let u = en.nextObject() as? URL {
             guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }  // skip subagents
             let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if newest == nil || mod > newest!.date { newest = (u, mod) }
         }
@@ -610,11 +719,15 @@ extension UsageLoader {
     /// A recent Claude Code chat (session), for the "recent chats" list.
     static func recentChats(within: TimeInterval = 86400, limit: Int = 6) -> [RecentChat] {
         let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         let now = Date()
         var recent: [(url: URL, date: Date)] = []
         while let u = en.nextObject() as? URL {
             guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            // Skip subagent/sidechain transcripts (Task tool, workflow finders, etc.) —
+            // they're named agent-*.jsonl and are NOT real chats. Counting them made
+            // WORKING NOW show "8 chats" and fired a "done" notification for each one.
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
             let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if now.timeIntervalSince(mod) <= within { recent.append((u, mod)) }
         }
@@ -636,7 +749,7 @@ extension UsageLoader {
                 // Only YOUR interactive chats: real Claude Code UI/CLI sessions carry an
                 // `entrypoint` (e.g. "claude-vscode"); subagent/workflow/headless
                 // sessions (the "Verify…"/"Audit…"/"qa-ok" ones) don't, so this drops them.
-                if let e = o["entrypoint"] as? String, !e.isEmpty { isInteractive = true }
+                if let e = o["entrypoint"] as? String, !e.isEmpty, e != "sdk-cli" { isInteractive = true }   // sdk-cli = automated, not a chat
                 if title == nil, (o["type"] as? String) == "ai-title" {
                     title = (o["aiTitle"] as? String) ?? (o["title"] as? String)
                 }
@@ -664,9 +777,27 @@ extension UsageLoader {
     /// The genuine human-typed text of a user message, or nil if this isn't one
     /// (tool_result continuation, or Claude Code injected context).
     private static func userPromptText(_ o: [String: Any]) -> String? {
-        guard (o["type"] as? String) == "user", let m = o["message"] as? [String: Any] else { return nil }
         let injected = ["<system-reminder", "<command-", "<local-command", "<user-memory",
-                        "Caveat:", "[Request interrupted", "This session is being continued"]
+                        "<task-notification", "<task-", "Caveat:", "[Request interrupted",
+                        "This session is being continued"]
+        // A message you TYPE while Claude is mid-turn is stored as a queued_command
+        // attachment, not a user record. Count it as the current prompt — otherwise
+        // WORKING NOW stays pinned to the last full turn (freezing the prompt text and
+        // running the elapsed timer for hours).
+        if (o["type"] as? String) == "attachment",
+           let att = o["attachment"] as? [String: Any],
+           (att["type"] as? String) == "queued_command",
+           (att["commandMode"] as? String) != "bash" {
+            let blocks = att["prompt"] as? [[String: Any]] ?? []
+            let texts = blocks.compactMap { b -> String? in
+                guard (b["type"] as? String) == "text", let t = b["text"] as? String else { return nil }
+                let tt = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (tt.isEmpty || injected.contains { tt.hasPrefix($0) }) ? nil : tt
+            }
+            let joined = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            return joined.isEmpty ? nil : joined
+        }
+        guard (o["type"] as? String) == "user", let m = o["message"] as? [String: Any] else { return nil }
         var text: String?
         if let s = m["content"] as? String { text = s }
         else if let blocks = m["content"] as? [[String: Any]] {
@@ -697,11 +828,13 @@ extension UsageLoader {
     /// The recent conversation of a session (your prompts + Claude's text replies),
     /// oldest→newest, for showing the real chat thread on the phone. Tail-reads so
     /// it's cheap even on a huge transcript (older messages beyond the tail drop off).
-    static func sessionMessages(sessionId: String, cwd: String = "", limit: Int = 40) -> [(role: String, text: String)] {
+    static func sessionMessages(sessionId: String, cwd: String = "", limit: Int = 200) -> [(role: String, text: String)] {
         let base = projectsBase()
         var url: URL?
         if !cwd.isEmpty {   // fast path: Claude Code encodes the cwd as the project dir name
-            let encoded = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            // CC replaces EVERY non-alphanumeric char with '-' (so '_', spaces, '.' etc.),
+            // not just '/' and '.' — otherwise the fast path missed and fell back to a scan.
+            let encoded = String(cwd.map { ($0.isLetter || $0.isNumber) ? $0 : "-" })
             let candidate = base.appendingPathComponent(encoded).appendingPathComponent("\(sessionId).jsonl")
             if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
         }

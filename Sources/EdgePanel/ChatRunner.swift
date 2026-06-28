@@ -16,7 +16,14 @@ final class ChatRunner: @unchecked Sendable {
         var error: String?
     }
 
+    /// Result of kicking off a turn: a job to poll, the session is already busy, or
+    /// the claude CLI couldn't be found.
+    enum StartResult { case started(String); case busy; case unavailable }
+
     private var jobs: [String: Job] = [:]
+    private var procs: [String: Process] = [:]   // running process per job, so it can be stopped
+    private var jobSession: [String: String] = [:]   // jobId → resume sessionId (to release the in-flight lock)
+    private var resuming: Set<String> = []           // sessionIds with a turn in flight (guard --resume races)
     private let lock = NSLock()
     private var counter = 0
     private let maxRuntime: TimeInterval = 600   // 10 min hard cap per turn
@@ -30,15 +37,26 @@ final class ChatRunner: @unchecked Sendable {
     }
     var available: Bool { Self.resolvedClaude != nil }
 
-    /// Kick off a chat turn; returns a jobId to poll, or nil if claude isn't found.
-    func start(cwd: String, sessionId: String?, message: String) -> String? {
-        guard let claude = Self.resolvedClaude else { return nil }
-        lock.lock(); counter += 1; let jid = "c\(counter)"; jobs[jid] = Job(status: "running"); lock.unlock()
+    /// Kick off a chat turn; returns a jobId to poll, `.busy` if a turn for the same
+    /// resume-session is already running, or `.unavailable` if claude isn't found.
+    func start(cwd: String, sessionId: String?, message: String) -> StartResult {
+        guard let claude = Self.resolvedClaude else { return .unavailable }
+        let resumeId = (sessionId?.isEmpty == false) ? sessionId : nil
+        lock.lock()
+        // Two `claude -p --resume <same id>` running at once would interleave writes
+        // into the same session JSONL and corrupt the thread — refuse the second.
+        if let sid = resumeId, resuming.contains(sid) { lock.unlock(); return .busy }
+        counter += 1; let jid = "c\(counter)"; jobs[jid] = Job(status: "running")
+        if let sid = resumeId { resuming.insert(sid); jobSession[jid] = sid }
+        lock.unlock()
 
         DispatchQueue.global(qos: .userInitiated).async { [maxRuntime] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: claude)
-            var args = ["-p", message, "--output-format", "json", "--permission-mode", "bypassPermissions"]
+            // stream-json + partial messages → token-by-token output we relay live to
+            // the phone (job.result grows while status stays "running").
+            var args = ["-p", message, "--output-format", "stream-json", "--verbose",
+                        "--include-partial-messages", "--permission-mode", "bypassPermissions"]
             if let sid = sessionId, !sid.isEmpty { args += ["--resume", sid] }
             p.arguments = args
             let dir = cwd.isEmpty ? NSHomeDirectory() : (cwd as NSString).expandingTildeInPath
@@ -49,47 +67,120 @@ final class ChatRunner: @unchecked Sendable {
             env["PATH"] = env["PATH"].map { "\($0):\(extra)" } ?? extra
             p.environment = env
 
-            // Capture stderr too — so a real failure (resume conflict, bad cwd, auth)
-            // surfaces a reason on the phone instead of a blank "doesn't send". Both
-            // pipes are drained concurrently to avoid a full-buffer deadlock.
             let out = Pipe(); let err = Pipe()
             p.standardOutput = out; p.standardError = err
             do { try p.run() } catch {
                 self.finish(jid, Job(status: "error", error: "couldn't launch claude: \(error.localizedDescription)")); return
             }
-            let sem = DispatchSemaphore(value: 0), errSem = DispatchSemaphore(value: 0)
-            var data = Data(), errData = Data()
-            DispatchQueue.global(qos: .utility).async { data = out.fileHandleForReading.readDataToEndOfFile(); sem.signal() }
+            self.lock.lock(); self.procs[jid] = p; self.lock.unlock()   // track for /chat/cancel
+            // Hard cap the turn; terminating EOFs the pipe so the read loop below exits.
+            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
+            // Drain stderr concurrently (surfaces a real failure reason on the phone).
+            var errData = Data(); let errSem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .utility).async { errData = err.fileHandleForReading.readDataToEndOfFile(); errSem.signal() }
-            if sem.wait(timeout: .now() + maxRuntime) == .timedOut {
-                p.terminate()
-                self.finish(jid, Job(status: "error", error: "timed out after \(Int(maxRuntime))s — the session may be busy on your Mac")); return
-            }
-            p.waitUntilExit()
-            _ = errSem.wait(timeout: .now() + 2)
-            let stderr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let result = (obj["result"] as? String) ?? ""
-                let sid = obj["session_id"] as? String
-                let isErr = (obj["is_error"] as? Bool) ?? false
-                let errMsg = !result.isEmpty ? result : (!stderr.isEmpty ? stderr : "claude returned an error")
-                self.finish(jid, Job(status: isErr ? "error" : "done",
-                                     result: isErr ? nil : result, sessionId: sid,
-                                     error: isErr ? errMsg : nil))
+            var accumulated = "", capturedSession: String?, finalResult: String?
+            var isError = false, sawResult = false
+            func handleLine(_ line: Data) {
+                guard let o = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+                      let type = o["type"] as? String else { return }
+                switch type {
+                case "system":
+                    if capturedSession == nil { capturedSession = o["session_id"] as? String }
+                case "stream_event":
+                    guard let ev = o["event"] as? [String: Any], let et = ev["type"] as? String else { return }
+                    if et == "content_block_delta", let d = ev["delta"] as? [String: Any],
+                       (d["type"] as? String) == "text_delta", let t = d["text"] as? String {
+                        accumulated += t
+                        self.update(jid, partial: accumulated, sessionId: capturedSession)
+                    } else if et == "content_block_start", let cb = ev["content_block"] as? [String: Any],
+                              (cb["type"] as? String) == "tool_use", let name = cb["name"] as? String {
+                        accumulated += (accumulated.isEmpty ? "" : "\n") + "⚙ \(name)…\n"
+                        self.update(jid, partial: accumulated, sessionId: capturedSession)
+                    }
+                case "result":
+                    sawResult = true
+                    isError = (o["is_error"] as? Bool) ?? false
+                    if let sid = o["session_id"] as? String { capturedSession = sid }
+                    finalResult = o["result"] as? String
+                default: break
+                }
+            }
+            // Read stdout line-by-line as it streams (availableData blocks until data/EOF).
+            let handle = out.fileHandleForReading
+            var buffer = Data()
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                buffer.append(chunk)
+                while let nl = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer.subdata(in: buffer.startIndex..<nl)
+                    buffer.removeSubrange(buffer.startIndex...nl)
+                    if !line.isEmpty { handleLine(line) }
+                }
+            }
+            if !buffer.isEmpty { handleLine(buffer) }
+            p.waitUntilExit()
+            watchdog.cancel()
+            // Only read errData once the reader has finished (avoid racing it). If it's
+            // still blocked in readDataToEndOfFile because an orphaned tool child inherited
+            // the stderr write-end, CLOSE the read handle so the reader thread unblocks and
+            // the pipe/thread are reclaimed instead of leaking for the rest of the session.
+            let gotErr = errSem.wait(timeout: .now() + 2) == .success
+            if !gotErr { try? err.fileHandleForReading.close() }
+            let stderr = gotErr ? (String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") : ""
+
+            let streamed = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalText = !streamed.isEmpty ? accumulated : (finalResult ?? "")
+            if isError {
+                let msg = !(finalResult ?? "").isEmpty ? finalResult! : (!stderr.isEmpty ? stderr : "claude returned an error")
+                self.finish(jid, Job(status: "error", error: msg))
+            } else if sawResult || !finalText.isEmpty {
+                self.finish(jid, Job(status: "done", result: finalText, sessionId: capturedSession))
             } else {
-                let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let code = p.terminationStatus
-                let ok = code == 0 && !raw.isEmpty
-                let detail = !stderr.isEmpty ? stderr : (raw.isEmpty ? "no output" : raw)
-                self.finish(jid, Job(status: ok ? "done" : "error",
-                                     result: ok ? raw : nil,
-                                     error: ok ? nil : "claude exited \(code): \(String(detail.prefix(300)))"))
+                let detail = !stderr.isEmpty ? stderr : "no output (exit \(code))"
+                self.finish(jid, Job(status: "error", error: "claude exited \(code): \(String(detail.prefix(300)))"))
             }
         }
-        return jid
+        return .started(jid)
     }
 
     func poll(_ jid: String) -> Job? { lock.lock(); defer { lock.unlock() }; return jobs[jid] }
-    private func finish(_ jid: String, _ job: Job) { lock.lock(); jobs[jid] = job; lock.unlock() }
+
+    /// Stop a running turn (from the phone). Terminating the process EOFs its pipe, so
+    /// the read loop finishes and reports whatever streamed so far + a "stopped" note.
+    @discardableResult
+    func cancel(_ jid: String) -> Bool {
+        lock.lock(); let p = procs[jid]; let running = jobs[jid]?.status == "running"; lock.unlock()
+        guard let p, running else { return false }
+        p.terminate()
+        return true
+    }
+
+    /// Terminate EVERY running turn (Panic Stop). Returns how many were killed.
+    @discardableResult
+    func cancelAll() -> Int {
+        lock.lock(); let running = procs.values.filter { $0.isRunning }; lock.unlock()
+        running.forEach { $0.terminate() }
+        return running.count
+    }
+
+    private func finish(_ jid: String, _ job: Job) {
+        lock.lock(); jobs[jid] = job; procs[jid] = nil
+        if let sid = jobSession.removeValue(forKey: jid) { resuming.remove(sid) }   // release the in-flight lock
+        // Evict old jobs so the map doesn't grow unbounded over a long session.
+        if jobs.count > 24 {
+            let keep = Set((max(1, counter - 23)...counter).map { "c\($0)" })
+            jobs = jobs.filter { keep.contains($0.key) }
+        }
+        lock.unlock()
+    }
+    /// Live-update the running job's partial reply (the phone polls and renders it as it streams).
+    private func update(_ jid: String, partial: String, sessionId: String?) {
+        lock.lock(); defer { lock.unlock() }
+        guard var j = jobs[jid], j.status == "running" else { return }
+        j.result = partial; j.sessionId = sessionId; jobs[jid] = j
+    }
 }

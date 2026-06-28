@@ -82,7 +82,38 @@ public enum RiskEngine {
         return nil
     }
 
+    /// Split into top-level statements (`;`, `&&`, `||`, `&`, newline) and return the
+    /// MOST SEVERE — pipelines (`a | b`) stay intact so "curl … | sh" is one statement.
+    /// Prevents a benign segment ("curl localhost") from downgrading a dangerous one
+    /// ("curl evil.com") in the same line, and stops substring checks from spanning
+    /// unrelated statements (audit #3/#16).
     private static func assessCommand(_ raw: String, depth: Int = 0) -> RiskAssessment {
+        let statements = splitStatements(raw)
+        guard statements.count > 1 else { return assessStatement(raw, depth: depth) }
+        return statements
+            .map { assessStatement($0, depth: depth) }
+            .max { a, b in a.level.rank != b.level.rank ? a.level.rank < b.level.rank
+                                                        : (!a.alwaysDangerous && b.alwaysDangerous) }
+            ?? assessStatement(raw, depth: depth)
+    }
+
+    private static func splitStatements(_ raw: String) -> [String] {
+        var out: [String] = [], cur = ""
+        let chars = Array(raw); var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == ";" || c == "\n" { out.append(cur); cur = ""; i += 1; continue }
+            if (c == "&" || c == "|"), i + 1 < chars.count, chars[i + 1] == c {  // && or ||
+                out.append(cur); cur = ""; i += 2; continue
+            }
+            if c == "&" { out.append(cur); cur = ""; i += 1; continue }          // background; keep single | (pipeline)
+            cur.append(c); i += 1
+        }
+        out.append(cur)
+        return out.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    private static func assessStatement(_ raw: String, depth: Int = 0) -> RiskAssessment {
         let cmd = raw.lowercased()
         let leaders = commandLeaders(cmd)
 
@@ -150,9 +181,14 @@ public enum RiskEngine {
         if cmd.contains("npm publish") || cmd.contains("pod trunk push") || cmd.contains("gh release create") {
             return red("publishes a release", always: true)
         }
-        // Network egress (non-piped).
+        // Network egress (non-piped). Only treat as a calm "local request" when a
+        // loopback host is the actual TARGET (host position) AND there's no external
+        // http(s) URL — so "localhost" buried in a path/query of an external URL can't
+        // downgrade a real egress.
         if cmd.contains("curl ") || cmd.contains("wget ") {
-            if cmd.contains("127.0.0.1") || cmd.contains("localhost") {
+            let loopbackHost = cmd.range(of: #"(://|@|\s|=)(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?([/\s"']|$)"#, options: .regularExpression) != nil
+            let externalURL = cmd.range(of: #"https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])"#, options: .regularExpression) != nil
+            if loopbackHost && !externalURL {
                 return RiskAssessment(level: .read, reason: "local request", alwaysDangerous: false)
             }
             return amber("network request")

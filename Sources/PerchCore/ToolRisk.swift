@@ -8,6 +8,11 @@ public enum RiskLevel: String, Sendable {
     case write    // amber — write/edit/create
     case danger   // red — Bash, network, rm, git push, deploy, …
     case unknown  // neutral — unrecognized tool
+
+    /// Severity ordering, so multi-statement commands can take the most severe.
+    public var rank: Int {
+        switch self { case .read: return 0; case .unknown: return 1; case .write: return 2; case .danger: return 3 }
+    }
 }
 
 public enum ToolRisk {

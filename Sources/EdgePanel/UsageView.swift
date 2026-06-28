@@ -170,7 +170,7 @@ struct MonthCalendar: View {
 // MARK: - New cards (the cheap wins)
 
 /// Recent chats: your latest Claude Code sessions, named by their ai-title (or a
-/// summarized first prompt). Click a row to resume that chat in Terminal.
+/// summarized first prompt). Click a row to open that chat's project in VS Code (or Cursor).
 struct RecentChatsCard: View {
     let chats: [RecentChat]
     let summaries: [String: String]
@@ -269,6 +269,17 @@ struct SessionsCard: View {
                                         .font(.claude(10)).foregroundColor(theme.subtext)
                                 }
                             }
+                            // Live proof-of-work: subagents in flight + prompts waiting in line.
+                            if s.runningAgents > 0 || s.queuedPrompts > 0 {
+                                HStack(spacing: 6) {
+                                    if s.runningAgents > 0 {
+                                        StatusPill(icon: "person.2.fill", text: "\(s.runningAgents) agent\(s.runningAgents == 1 ? "" : "s") working", color: theme.green)
+                                    }
+                                    if s.queuedPrompts > 0 {
+                                        StatusPill(icon: "tray.full.fill", text: "\(s.queuedPrompts) queued", color: theme.subtext)
+                                    }
+                                }
+                            }
                         }
                         .padding(.vertical, 3)
                     }
@@ -279,6 +290,20 @@ struct SessionsCard: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
         }
+    }
+}
+
+/// A small icon+text capsule for live-status badges (agents working / prompts queued).
+private struct StatusPill: View {
+    let icon: String, text: String, color: Color
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+            Text(text).font(.claude(10, .semibold))
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .background(Capsule().fill(color.opacity(0.14)))
     }
 }
 

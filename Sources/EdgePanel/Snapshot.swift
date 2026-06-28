@@ -13,6 +13,7 @@ struct EdgeSnapshot: Codable {
     var calendar: [CalDay]
     var pending: Pending?      // a permission request waiting on you (approve from the phone)
     var question: Question?    // an AskUserQuestion waiting on you (answer from the phone)
+    var autoApprove: Bool = false   // Autonomous mode is on (every permission auto-allowed)
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -34,6 +35,8 @@ struct EdgeSnapshot: Codable {
         var promptSummary: String?
         var promptAtEpoch: Double?
         var turnTokens: Int
+        var runningAgents: Int = 0
+        var queuedPrompts: Int = 0
     }
     struct Chat: Codable {
         var id: String
@@ -88,10 +91,17 @@ struct EdgeSnapshot: Codable {
             return s.block?.cost ?? 0
         }()
 
-        let working = store.sessions.filter { $0.isWorking() }.map { sn in
+        // Publish the DEBOUNCED working set (carries a session for 1 missing scan) rather
+        // than the raw isWorking() filter, so a single-scan blip never flickers the phone's
+        // Dynamic Island or fires a false "finished". Falls back to the raw filter until the
+        // first detectEnded() pass has populated it.
+        let workingSrc = store.workingDebounced.isEmpty ? store.sessions.filter { $0.isWorking() }
+                                                        : store.workingDebounced
+        let working = workingSrc.map { sn in
             Working(id: sn.id, project: sn.project, cwd: sn.cwd, model: sn.model.map(prettyModel),
                     prompt: sn.promptText, promptSummary: store.promptSummaries[sn.id],
-                    promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens)
+                    promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens,
+                    runningAgents: sn.runningAgents, queuedPrompts: sn.queuedPrompts)
         }
         let chats = store.recentChats.map { c in
             Chat(id: c.id, name: c.name(summaries: store.promptSummaries), project: c.project,
@@ -115,6 +125,6 @@ struct EdgeSnapshot: Codable {
         return EdgeSnapshot(generatedAt: now.timeIntervalSince1970, plan: plan,
                             spend: Spend(fiveHourUSD: windowSpend),
                             working: working, chats: chats, calendar: calendar,
-                            pending: pending, question: question)
+                            pending: pending, question: question, autoApprove: state.autoApprove)
     }
 }

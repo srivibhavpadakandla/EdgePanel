@@ -39,6 +39,7 @@ struct PendingPermission: Identifiable, Equatable {
     let allowRule: String
     let preview: [PreviewLine]
     let project: String?
+    var alwaysDangerous: Bool = false   // the irreversible 1% — still needs a tap even in Autonomous
 }
 
 @MainActor
@@ -58,6 +59,36 @@ final class EdgePanelState: ObservableObject {
     @Published var pending: PendingPermission?
     /// Bridges to the window controller: true → lock open + auto-reveal.
     var onApprovalChange: ((Bool) -> Void)?
+    /// Autonomous mode (toggled from the phone): auto-allow every permission so a
+    /// session runs hands-off. Persisted so it survives a restart.
+    @Published var autoApprove = UserDefaults.standard.bool(forKey: "edgepanel.autoApprove")
+    func setAutoApprove(_ on: Bool) {
+        autoApprove = on
+        UserDefaults.standard.set(on, forKey: "edgepanel.autoApprove")
+        // Clear anything already waiting — EXCEPT the irreversible 1%, which Guardian
+        // always holds for a tap even in Autonomous, so flipping the toggle on can't
+        // wave through an rm -rf / force-push that was already sitting on the gate.
+        if on, let p = pending, !p.alwaysDangerous { resolveCurrent(.allow) }
+    }
+
+    /// PANIC STOP: kill every running chat turn, turn Autonomous off, deny everything
+    /// currently held, and refuse new (non-read) permissions for a short window so a
+    /// runaway turn can't slip an approval through in the gap. Returns turns killed.
+    @Published var panicArmed = false
+    @discardableResult
+    func panic() -> Int {
+        setAutoApprove(false)
+        panicArmed = true
+        for bid in Array(resolvers.keys) { resolve(bid, .deny) }   // deny all held permission requests
+        for qid in Array(questionResolvers.keys) { resolveQuestion(qid, [:]) }   // dismiss all held questions
+        let killed = ChatRunner.shared.cancelAll()
+        panicResetTimer?.invalidate()
+        panicResetTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.panicArmed = false }
+        }
+        return killed
+    }
+    private var panicResetTimer: Timer?
 
     // MARK: Held AskUserQuestion gate (answer from the phone)
     @Published var pendingQuestion: PendingQuestion?
@@ -65,6 +96,8 @@ final class EdgePanelState: ObservableObject {
     private var questionCounter = 0
 
     private var resolvers: [String: CheckedContinuation<PermissionVerdict, Never>] = [:]
+    private var pendingRules: [String: String] = [:]   // id → allow-rule (for "always", survives rotation)
+    private var pendingById: [String: PendingPermission] = [:]   // id → request (to re-surface the next one on resolve)
     private var blockingCounter = 0
     private let decisionTimeout: TimeInterval =
         TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 30
@@ -144,6 +177,12 @@ final class EdgePanelState: ObservableObject {
         let assessment = RiskEngine.assess(toolName: event.toolName, event: event, cwd: event.cwd)
         // Don't interrupt for plainly read-only actions.
         if assessment.level == .read { return .allow }
+        // Panic Stop window → refuse everything that isn't read-only.
+        if panicArmed { return .deny }
+        // Autonomous mode → auto-allow hands-off, EXCEPT the irreversible 1% (rm -rf,
+        // force-push to a protected branch, curl|sh, publish, disk writes…) which still
+        // surfaces for one tap even when auto-approving. (Guardian Auto-Approve.)
+        if autoApprove && !assessment.alwaysDangerous { return .allow }
 
         blockingCounter += 1
         let bid = "b\(blockingCounter)"
@@ -155,10 +194,13 @@ final class EdgePanelState: ObservableObject {
             risk: assessment.level,
             allowRule: AllowlistWriter.rule(for: event),
             preview: Self.buildPreview(event),
-            project: event.projectLabel
+            project: event.projectLabel,
+            alwaysDangerous: assessment.alwaysDangerous
         )
         return await withCheckedContinuation { continuation in
             resolvers[bid] = continuation
+            pendingRules[bid] = request.allowRule
+            pendingById[bid] = request
             pending = request
             onApprovalChange?(true)           // lock open + auto-reveal
             pushPermissionAlert(request)      // Tier 2: ping the phone (no-op unless APNs configured)
@@ -180,7 +222,11 @@ final class EdgePanelState: ObservableObject {
     func resolveRemote(id: String, decision: String) {
         switch decision.lowercased() {
         case "always":
-            if let p = pending, p.id == id { AllowlistWriter.add(rule: p.allowRule) }
+            // Look the rule up by id — not the current `pending` slot, which may have
+            // rotated to a newer request, silently dropping the allowlist write (#15).
+            if let rule = pendingRules[id] ?? (pending?.id == id ? pending?.allowRule : nil) {
+                AllowlistWriter.add(rule: rule)
+            }
             resolve(id, .allow)
         case "deny":
             resolve(id, .deny)
@@ -197,10 +243,18 @@ final class EdgePanelState: ObservableObject {
     }
 
     private func resolve(_ bid: String, _ verdict: PermissionVerdict) {
-        guard let continuation = resolvers.removeValue(forKey: bid) else { return }
+        guard let continuation = resolvers.removeValue(forKey: bid) else { return }   // also guards double-resolve
+        pendingRules[bid] = nil; pendingById[bid] = nil
         continuation.resume(returning: verdict)
-        if pending?.id == bid { pending = nil }
-        onApprovalChange?(false)              // release the lock-open
+        if pending?.id == bid {
+            // Surface the next still-outstanding request instead of orphaning it, and only
+            // release the lock-open when none remain (was: cleared the gate unconditionally).
+            // Pick the OLDEST (lowest "b<n>" counter) so requests resolve in arrival order
+            // rather than in arbitrary dictionary order.
+            let nextId = pendingById.keys.min { (Int($0.dropFirst()) ?? 0) < (Int($1.dropFirst()) ?? 0) }
+            pending = nextId.flatMap { pendingById[$0] }
+            onApprovalChange?(pending != nil)
+        }
     }
 
     // MARK: - Held AskUserQuestion (answer from the phone)
@@ -220,6 +274,7 @@ final class EdgePanelState: ObservableObject {
                                         multiSelect: (q["multiSelect"] as? Bool) ?? false, options: opts)
         }
         guard !items.isEmpty else { return [:] }
+        if panicArmed { return [:] }   // Panic window → don't hold the turn open on a question
         questionCounter += 1
         let qid = "q\(questionCounter)"
         let request = PendingQuestion(id: qid, items: items, project: project)
@@ -229,10 +284,11 @@ final class EdgePanelState: ObservableObject {
             onApprovalChange?(true)
             pushQuestionAlert(request)
             idleTimer?.invalidate(); idleTimer = nil
-            // Clean up well AFTER the hook's own timeout (120s) so the desktop UI
-            // takes over via that timeout — we never send a bogus empty answer.
+            // Clean up just UNDER the hook's own timeout (120s) so the gate releases and
+            // the desktop UI takes over at the timeout, instead of lingering ~30s
+            // locked-open after the hook already gave up. We resolve empty (no answer).
             Task { [weak self, qid] in
-                try? await Task.sleep(nanoseconds: 150 * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 115 * 1_000_000_000)
                 self?.resolveQuestion(qid, [:])
             }
         }
@@ -258,9 +314,25 @@ final class EdgePanelState: ObservableObject {
         NtfyPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
     }
 
+    /// Mask common secret patterns so a token/key in a command or diff doesn't get
+    /// shown in the approval card or shipped through APNs/ntfy in the push body.
+    static func redactSecrets(_ s: String) -> String {
+        var out = s
+        let rules: [(String, String)] = [
+            (#"(?i)\b(authorization|bearer|api[_-]?key|secret|token|password|passwd|access[_-]?key)\b(\s*[:=]\s*)\S+"#, "$1$2«redacted»"),
+            (#"sk-[A-Za-z0-9_\-]{16,}"#, "«redacted»"),
+            (#"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"#, "«redacted»"),
+            (#"github_pat_[A-Za-z0-9_]{20,}"#, "«redacted»"),
+            (#"AKIA[0-9A-Z]{16}"#, "«redacted»"),
+            (#"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{6,}"#, "«redacted»"),
+        ]
+        for (pat, rep) in rules { out = out.replacingOccurrences(of: pat, with: rep, options: .regularExpression) }
+        return out
+    }
+
     static func buildPreview(_ event: HookEvent) -> [PreviewLine] {
         let maxLines = 6
-        if let old = event.oldString, let new = event.newString {
+        if let old = event.oldString.map(redactSecrets), let new = event.newString.map(redactSecrets) {
             var lines: [PreviewLine] = []
             for l in old.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines / 2) {
                 lines.append(PreviewLine(kind: .removed, text: String(l)))
@@ -270,11 +342,11 @@ final class EdgePanelState: ObservableObject {
             }
             return lines
         }
-        if let content = event.content {
+        if let content = event.content.map(redactSecrets) {
             return content.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
                 .map { PreviewLine(kind: .added, text: String($0)) }
         }
-        if let cmd = event.command {
+        if let cmd = event.command.map(redactSecrets) {
             return cmd.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
                 .map { PreviewLine(kind: .context, text: String($0)) }
         }
@@ -295,9 +367,26 @@ final class EdgePanelState: ObservableObject {
 
     private var activityPushTokens: [String: String] = [:]   // sessionId → Live Activity token
     private var devicePushToken: String?
+    private var lastFinishedDetail: String?   // "1m 36s · 18.4K tokens" — used as the Island's done detail
+    private var pendingEndTask: Task<Void, Never>?   // deferred Live Activity "end" (cancellable if work resumes)
 
     private var pushToStartToken: String?     // iOS 17.2+ push-to-start (pop the Island up while closed)
     private var startPushPending = false
+
+    /// Load persisted push tokens so a Mac restart doesn't drop them (which left the
+    /// Island unable to receive its "end" and stuck on a frozen timer).
+    func loadPushTokens() {
+        let d = UserDefaults.standard
+        if let m = d.dictionary(forKey: "edgepanel.activityTokens") as? [String: String] { activityPushTokens = m }
+        pushToStartToken = d.string(forKey: "edgepanel.startToken")
+        devicePushToken = d.string(forKey: "edgepanel.deviceToken")
+    }
+    private func savePushTokens() {
+        let d = UserDefaults.standard
+        d.set(activityPushTokens, forKey: "edgepanel.activityTokens")
+        d.set(pushToStartToken, forKey: "edgepanel.startToken")
+        d.set(devicePushToken, forKey: "edgepanel.deviceToken")
+    }
 
     func setPushToken(kind: String, sessionId: String?, token: String) {
         switch kind {
@@ -306,6 +395,7 @@ final class EdgePanelState: ObservableObject {
         case "starttoken": pushToStartToken = token
         default:          break
         }
+        savePushTokens()
         NSLog("EdgePanel push token received: kind=\(kind) sid=\(sessionId ?? "-") token=\(token.prefix(12))…")
     }
 
@@ -320,6 +410,11 @@ final class EdgePanelState: ObservableObject {
         guard APNsPusher.shared.enabled else { return }
         let ids = Set(working.map { $0.id })
         let membershipChanged = ids != lastPushedWorkingIds
+
+        // A brand-new prompt after being idle → re-arm push-to-start so the Island pops
+        // up again. (Otherwise startPushPending could stay set from the previous turn and
+        // the next prompt never re-popped the Island while the app was closed.)
+        if lastPushedWorkingIds.isEmpty && !working.isEmpty { startPushPending = false }
 
         // Work ended with no live activity to push to → reset so a fresh start fires next time.
         if working.isEmpty && activityPushTokens["edgepanel"] == nil {
@@ -338,13 +433,31 @@ final class EdgePanelState: ObservableObject {
 
         guard let token = activityPushTokens["edgepanel"] else { lastPushedWorkingIds = ids; return }
         startPushPending = false                       // the app has a live activity now
+        // A new turn started → cancel any pending "end" so we don't tear down the Island
+        // that's now live again (the deferred end below could otherwise fire mid-turn).
+        if !working.isEmpty { pendingEndTask?.cancel(); pendingEndTask = nil }
         guard membershipChanged || (!working.isEmpty && Date().timeIntervalSince(lastAggregatePush) > 12) else { return }
         lastPushedWorkingIds = ids
         lastAggregatePush = Date()
         if working.isEmpty {
-            APNsPusher.shared.pushActivity(token: token, event: "end",
-                contentState: ["sessions": [[String: Any]](), "done": true, "doneDetail": "finished"])
-            activityPushTokens["edgepanel"] = nil      // ended → allow a fresh push-to-start next time
+            // Two-step "complete" so the Island/Lock Screen visibly flips to DONE before
+            // it dismisses. The Island is torn down on `end` regardless of dismissal-date,
+            // so the done state MUST be shown via a prior `update` (verified vs ActivityKit
+            // docs). update(done) → hold → end(done)+dismissal, then release the token.
+            let detail = lastFinishedDetail ?? "finished"
+            let doneState: [String: Any] = ["sessions": [[String: Any]](), "done": true, "doneDetail": detail]
+            APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState)
+            pendingEndTask?.cancel()
+            pendingEndTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)   // hold "✓ Complete" visibly on the Island
+                guard let self, !Task.isCancelled,
+                      self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
+                      self.activityPushTokens["edgepanel"] == token // …and the same activity
+                else { return }
+                APNsPusher.shared.pushActivity(token: token, event: "end", contentState: doneState)
+                self.activityPushTokens["edgepanel"] = nil   // ended → allow a fresh push-to-start next time
+                self.savePushTokens()
+            }
             return
         }
         APNsPusher.shared.pushActivity(token: token, event: "update", contentState: aggregateState(working))
@@ -357,7 +470,8 @@ final class EdgePanelState: ObservableObject {
             ["id": sn.id, "project": sn.project,
              "prompt": sn.promptText.map { String($0.prefix(80)) } ?? "working…",
              "startEpoch": sn.promptAt?.timeIntervalSince1970 ?? Date().timeIntervalSince1970,
-             "tokens": sn.turnTokens, "freezeAt": freezeAt]
+             "tokens": sn.turnTokens, "agents": sn.runningAgents, "queued": sn.queuedPrompts,
+             "freezeAt": freezeAt]
         }
         return ["sessions": sessions, "done": false]
     }
@@ -366,7 +480,7 @@ final class EdgePanelState: ObservableObject {
     /// the app fully closed. Two independent paths: APNs (Tier 2, paid) and ntfy
     /// (free, with Allow/Deny action buttons). No-op if neither is configured.
     private func pushPermissionAlert(_ p: PendingPermission) {
-        let body = p.summary.isEmpty ? p.reason : p.summary
+        let body = Self.redactSecrets(p.summary.isEmpty ? p.reason : p.summary)   // don't ship a secret through APNs/ntfy
         if APNsPusher.shared.enabled, let dt = devicePushToken {
             APNsPusher.shared.pushPermission(deviceToken: dt, id: p.id,
                 title: "\(p.toolName) needs approval", body: body)
@@ -380,18 +494,67 @@ final class EdgePanelState: ObservableObject {
         let elapsed = s.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
         let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
         let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
-        let detail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
-        // The Live Activity itself is ended by pushAggregate (one aggregate activity);
-        // here we only fire the "done" alert. (A per-session activity push would carry
-        // the wrong content-state schema, so it's intentionally not done here.)
-        if APNsPusher.shared.enabled, let dt = devicePushToken {
-            APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(s.project) finished", body: detail)
+        let baseDetail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
+        lastFinishedDetail = baseDetail   // pushAggregate (fires right after) shows this as the Island's done detail
+        let project = s.project, cwd = s.cwd, dt = devicePushToken
+        // Outcome Card: enrich the "done" alert with WHAT changed (git working-tree diff),
+        // computed off-main so the git call never blocks the UI.
+        DispatchQueue.global(qos: .utility).async {
+            let outcome = Self.gitOutcome(cwd: cwd)               // " · 2 files +40−5: ChatRunner.swift, …"
+            let body = baseDetail + outcome
+            DispatchQueue.main.async {
+                if APNsPusher.shared.enabled, let dt {
+                    APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(project) finished", body: body)
+                }
+                if elapsed >= 15 { NtfyPusher.shared.pushDone(title: "✓ \(project) finished", detail: body) }
+            }
         }
-        // Free fully-closed path — skip sub-15s blips so it only pings for turns
-        // you'd actually wait on.
-        if elapsed >= 15 {
-            NtfyPusher.shared.pushDone(title: "✓ \(s.project) finished", detail: detail)
+    }
+
+    nonisolated private static let gitPath: String? = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    /// What Claude changed in `cwd`'s working tree — files + ±lines — for the done card.
+    /// Empty string if not a git repo / nothing changed / git unavailable.
+    nonisolated static func gitOutcome(cwd: String) -> String {
+        guard !cwd.isEmpty, gitPath != nil else { return "" }
+        let dir = (cwd as NSString).expandingTildeInPath
+        guard runGit(dir, ["rev-parse", "--is-inside-work-tree"]) == "true" else { return "" }
+        // `diff HEAD` covers tracked changes (staged + unstaged). Brand-new files are
+        // UNTRACKED — invisible to diff — so a scaffolding turn would read as "nothing
+        // changed"; fold those in via `ls-files --others` so new work shows up too.
+        let tracked = (runGit(dir, ["diff", "--name-only", "HEAD"]) ?? "")
+            .split(separator: "\n").map(String.init)
+        let untracked = (runGit(dir, ["ls-files", "--others", "--exclude-standard"]) ?? "")
+            .split(separator: "\n").map(String.init)
+        var seen = Set<String>()
+        let names = (tracked + untracked).filter { seen.insert($0).inserted }
+        guard !names.isEmpty else { return "" }
+        let shortstat = runGit(dir, ["diff", "--shortstat", "HEAD"]) ?? ""
+        func num(_ kw: String) -> Int {
+            guard let r = shortstat.range(of: #"(\d+) "# + kw, options: .regularExpression) else { return 0 }
+            return Int(shortstat[r].prefix(while: { $0.isNumber })) ?? 0
         }
+        let plus = num("insertion"), minus = num("deletion")
+        let lines = (plus > 0 || minus > 0) ? " +\(plus)−\(minus)" : ""
+        let shown = names.prefix(2).map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        let more = names.count > 2 ? " +\(names.count - 2)" : ""
+        return " · \(names.count) file\(names.count == 1 ? "" : "s")\(lines): \(shown)\(more)"
+    }
+
+    nonisolated private static func runGit(_ dir: String, _ args: [String]) -> String? {
+        guard let git = gitPath else { return nil }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: git)
+        p.arguments = ["-C", dir] + args
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate(); return nil }
+        guard p.terminationStatus == 0 else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// "Take me there": open the chat's project in VS Code (or Cursor) — where

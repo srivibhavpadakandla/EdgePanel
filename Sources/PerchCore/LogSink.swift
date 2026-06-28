@@ -63,12 +63,17 @@ public final class LogSink: @unchecked Sendable {
             print(line)
             fflush(stdout)
             if let url = self.fileURL, let data = (line + "\n").data(using: .utf8) {
+                // Throwing APIs so an I/O error is recoverable (not an uncatchable
+                // ObjC exception), and create-then-append so we never clobber the file.
+                if (try? FileHandle(forWritingTo: url)) == nil {
+                    try? Data().write(to: url)   // ensure it exists, then append below
+                }
                 if let handle = try? FileHandle(forWritingTo: url) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    try? handle.close()
-                } else {
-                    try? data.write(to: url)
+                    defer { try? handle.close() }
+                    do {
+                        try handle.seekToEnd()
+                        try handle.write(contentsOf: data)
+                    } catch { /* drop this line rather than crash the server */ }
                 }
             }
         }

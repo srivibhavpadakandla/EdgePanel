@@ -22,13 +22,33 @@ final class UsageStore: ObservableObject {
 
     // Live "which chats are working" list.
     @Published var sessions: [LiveSession] = []
+    /// The DEBOUNCED working set (a session is carried for 1 missing scan before being
+    /// declared finished) — the snapshot publishes THIS, not the raw per-scan filter, so
+    /// the phone never sees a single-scan isWorking() blip flicker the Dynamic Island.
+    @Published var workingDebounced: [LiveSession] = []
     // Fires when a working session finishes (was generating, now done) — used to
     // push a "done" Live Activity update + notification to the phone (Tier 2).
     var onSessionEnded: ((LiveSession) -> Void)?
+    // The interactive editor/CLI session you're watching ON this Mac — its "finished"
+    // phone alert is suppressed (you don't need a ping for the chat on your screen).
+    // Cached so detectEnded() doesn't re-scan the filesystem every 2s.
+    private var cachedInteractiveId: String?
+    private var interactiveIdAt = Date.distantPast
+    private func currentInteractiveId() -> String? {
+        if Date().timeIntervalSince(interactiveIdAt) > 30 {
+            cachedInteractiveId = UsageLoader.mostRecentInteractiveSessionId()
+            interactiveIdAt = Date()
+        }
+        return cachedInteractiveId
+    }
     /// Fires whenever the set of working sessions changes — drives the APNs push that
     /// ends/updates the phone's Live Activity seamlessly.
     var onWorkingChanged: (([LiveSession]) -> Void)?
     private var prevWorking: [String: LiveSession] = [:]
+    private var endMisses: [String: Int] = [:]   // id → consecutive scans seen not-working (debounce)
+    private var sessionScanGen = 0               // assigned per dispatched session scan (ordering)
+    private var appliedSessionGen = 0            // highest scan gen whose result we've applied
+    private func nextSessionGen() -> Int { sessionScanGen += 1; return sessionScanGen }
 
     // Recent Claude Code chats (sessions), newest first.
     @Published var recentChats: [RecentChat] = []
@@ -82,9 +102,12 @@ final class UsageStore: ObservableObject {
     }
 
     func refreshSessions() {
+        let gen = nextSessionGen()
         sessionQ.async {
             let sessions = UsageLoader.activeSessions()
             DispatchQueue.main.async {
+                guard gen > self.appliedSessionGen else { return }   // a fresher scan already applied — drop this stale one
+                self.appliedSessionGen = gen
                 self.sessions = sessions
                 self.updateSummaries(sessions)
                 self.detectEnded()
@@ -92,16 +115,33 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// Fire onSessionEnded for sessions that were generating and now aren't.
+    /// Fire onSessionEnded for sessions that were generating and now aren't — but only
+    /// after they've been absent for 2 consecutive scans (~4s), so a transient blip
+    /// (the gap between two turns, or a mid-write transcript) doesn't spam a false
+    /// "finished" notification.
     private func detectEnded() {
-        let working = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
-        // Index ALL current sessions (incl. the just-finished ones) — their freshly
-        // recomputed turnTokens include the turn's final message, so the "done"
-        // notification shows the real token count instead of the stale (often 0) value.
+        let workingNow = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
+        // Index ALL current sessions (incl. just-finished) so the done notification's
+        // token count reflects the turn's final message, not a stale 0.
         let byId = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        for (id, prev) in prevWorking where working[id] == nil { onSessionEnded?(byId[id] ?? prev) }
-        prevWorking = working
-        onWorkingChanged?(Array(working.values))
+        let interactiveId = currentInteractiveId()
+        var carried = workingNow
+        for (id, prev) in prevWorking where workingNow[id] == nil {
+            let misses = (endMisses[id] ?? 0) + 1
+            if misses >= 2 {                       // gone for 2 scans → really finished
+                // No phone "finished" ping for the session you're actively watching on
+                // this Mac — it just spams a notification for your own on-screen turn.
+                if id != interactiveId { onSessionEnded?(byId[id] ?? prev) }
+                endMisses[id] = nil
+            } else {                               // first miss → keep tracking, don't fire yet
+                endMisses[id] = misses
+                carried[id] = prev
+            }
+        }
+        for id in workingNow.keys { endMisses[id] = nil }   // working again → reset its counter
+        prevWorking = carried
+        workingDebounced = Array(carried.values)            // the smoothed set the snapshot publishes
+        onWorkingChanged?(Array(carried.values))
     }
 
     /// Summarize long, title-less chat names (the claude CLI), keyed by chat id.
@@ -147,6 +187,7 @@ final class UsageStore: ObservableObject {
     func load() {
         loadPlan()
         loading = true
+        let gen = nextSessionGen()
         q.async {
             let s = UsageLoader.computeSummary()
             let sessions = UsageLoader.activeSessions()
@@ -154,10 +195,15 @@ final class UsageStore: ObservableObject {
             DispatchQueue.main.async {
                 self.summary = s
                 self.loading = false
-                self.sessions = sessions
                 self.recentChats = chats
-                self.updateSummaries(sessions)
                 self.updateChatSummaries(chats)
+                // Only apply the session/ended detection if this is the freshest scan —
+                // otherwise a slow stale scan overwrites a newer one and fires a spurious
+                // "finished" (audit #11).
+                guard gen > self.appliedSessionGen else { return }
+                self.appliedSessionGen = gen
+                self.sessions = sessions
+                self.updateSummaries(sessions)
                 self.detectEnded()
             }
         }
