@@ -204,6 +204,7 @@ struct ChatListView: View {
     @ObservedObject private var store = ChatStore.shared
     @EnvironmentObject var client: EdgeClient
     @State private var showNew = false
+    @State private var showPanic = false
     @State private var openId: String?
     var body: some View {
         NavigationStack {
@@ -233,10 +234,18 @@ struct ChatListView: View {
                 }
             }
             .navigationTitle("Command")
+            .confirmationDialog("Stop everything?", isPresented: $showPanic, titleVisibility: .visible) {
+                Button("Stop all & disarm", role: .destructive) { client.panic() }
+            } message: { Text("Kills every running task, turns Autonomous off, and denies pending permissions.") }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { AutonomyToggle().environmentObject(client) }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showNew = true } label: { Image(systemName: "plus.circle.fill").font(.system(size: 19, weight: .semibold)) }
+                    HStack(spacing: 16) {
+                        Button(role: .destructive) { showPanic = true } label: {
+                            Image(systemName: "exclamationmark.octagon.fill").font(.system(size: 18)).foregroundColor(T.red)
+                        }
+                        Button { showNew = true } label: { Image(systemName: "plus.circle.fill").font(.system(size: 19, weight: .semibold)) }
+                    }
                 }
             }
             .navigationDestination(item: $openId) { id in
@@ -258,9 +267,12 @@ struct ChatListView: View {
 /// auto-allows every permission so work runs hands-off.
 private struct AutonomyToggle: View {
     @EnvironmentObject var client: EdgeClient
-    private var on: Bool { client.snapshot?.autoApprove ?? false }
+    @State private var pending: Bool?      // optimistic flip until the snapshot reconciles
+    private var on: Bool { pending ?? client.snapshot?.autoApprove ?? false }
     var body: some View {
-        Button { client.setAutoApprove(!on) } label: {
+        Button {
+            let next = !on; pending = next; client.setAutoApprove(next)   // flip instantly
+        } label: {
             HStack(spacing: 5) {
                 Image(systemName: on ? "bolt.fill" : "bolt.slash.fill")
                 Text(on ? "Autonomous" : "Manual").font(.claude(12, .semibold))
@@ -269,6 +281,7 @@ private struct AutonomyToggle: View {
             .padding(.horizontal, 9).padding(.vertical, 5)
             .background(Capsule().fill(on ? T.accent.opacity(0.15) : T.track))
         }
+        .onChange(of: client.snapshot?.autoApprove) { _, v in if v == pending { pending = nil } }
     }
 }
 

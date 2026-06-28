@@ -162,6 +162,15 @@ final class EdgeClient: ObservableObject {
         return arr.compactMap { p in p["cwd"].map { Project(name: p["name"] ?? ($0 as NSString).lastPathComponent, cwd: $0) } }
     }
 
+    /// PANIC STOP: kill all running turns + Autonomous off + deny held/incoming.
+    func panic() {
+        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/panic") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        Task { _ = try? await URLSession.shared.data(for: req); await poll() }
+    }
+
     /// Toggle Autonomous (auto-approve) mode on the Mac.
     func setAutoApprove(_ on: Bool) {
         guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/automode") else { return }

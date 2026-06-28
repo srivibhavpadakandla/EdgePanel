@@ -181,6 +181,7 @@ final class ActivityManager {
     }
 
     /// Usage guardrail: notify once when crossing 80% / 90% (re-arms on reset).
+    private var forecastAlerted = false
     func checkUsage(plan: EdgeSnapshot.PlanInfo?) {
         guard let pct = plan?.fiveHourPct else { return }
         if pct < lastPlanPct - 5 { alertedAt.removeAll() }   // window reset → re-arm
@@ -189,6 +190,17 @@ final class ActivityManager {
             alertedAt.insert(threshold)
             notify(title: "⚠︎ \(threshold)% of your 5-hour limit", body: "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
         }
+        // Forecast: at the current burn rate you'll hit the cap within ~45 min → one
+        // proactive heads-up with the projected time (re-arms when the pace eases).
+        if let hit = plan?.limitClockEpoch {
+            let mins = Date(timeIntervalSince1970: hit).timeIntervalSinceNow / 60
+            if mins > 0, mins <= 45, !forecastAlerted {
+                forecastAlerted = true
+                let t = DateFormatter.localizedString(from: Date(timeIntervalSince1970: hit), dateStyle: .none, timeStyle: .short)
+                notify(title: "⏳ On track to hit your 5-hour cap", body: "At this pace, around \(t). Ease off or pause autonomous tasks.")
+            }
+            if mins > 60 || mins <= 0 { forecastAlerted = false }
+        } else { forecastAlerted = false }
     }
 
     private func doneDetail(_ w: EdgeSnapshot.Working) -> String {

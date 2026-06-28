@@ -6,7 +6,7 @@
 	<integer>12</integer>
 	<key>logs</key>
 	<dict>
-		<key>C6081351-B02A-4AFF-82F3-CB7F31A4485B</key>
+		<key>81DD9E48-0632-4924-AD4C-0381A904F43C</key>
 		<dict>
 			<key>className</key>
 			<string>IDECommandLineBuildLog</string>
@@ -15,7 +15,7 @@
 			<key>domainType</key>
 			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
 			<key>fileName</key>
-			<string>C6081351-B02A-4AFF-82F3-CB7F31A4485B.xcactivitylog</string>
+			<string>81DD9E48-0632-4924-AD4C-0381A904F43C.xcactivitylog</string>
 			<key>hasPrimaryLog</key>
 			<true/>
 			<key>primaryObservable</key>
@@ -40,15 +40,15 @@
 			<key>signature</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>timeStartedRecording</key>
-			<real>804295493.28553796</real>
+			<real>804322966.94717097</real>
 			<key>timeStoppedRecording</key>
-			<real>804295498.48924398</real>
+			<real>804322971.96337295</real>
 			<key>title</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>uniqueIdentifier</key>
-			<string>C6081351-B02A-4AFF-82F3-CB7F31A4485B</string>
+			<string>81DD9E48-0632-4924-AD4C-0381A904F43C</string>
 		</dict>
-		<key>F4E06BAF-5126-4B3B-A50F-A48BA644A96B</key>
+		<key>C63F5E78-00C1-455B-BA5E-6431E5F69C4D</key>
 		<dict>
 			<key>className</key>
 			<string>IDECommandLineBuildLog</string>
@@ -57,7 +57,7 @@
 			<key>domainType</key>
 			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
 			<key>fileName</key>
-			<string>F4E06BAF-5126-4B3B-A50F-A48BA644A96B.xcactivitylog</string>
+			<string>C63F5E78-00C1-455B-BA5E-6431E5F69C4D.xcactivitylog</string>
 			<key>hasPrimaryLog</key>
 			<true/>
 			<key>primaryObservable</key>
@@ -82,13 +82,13 @@
 			<key>signature</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>timeStartedRecording</key>
-			<real>804294026.26378596</real>
+			<real>804323076.80884504</real>
 			<key>timeStoppedRecording</key>
-			<real>804294032.79278696</real>
+			<real>804323081.54566801</real>
 			<key>title</key>
 			<string>Building project EdgePanelMobile with scheme EdgePanelMobile and configuration Debug</string>
 			<key>uniqueIdentifier</key>
-			<string>F4E06BAF-5126-4B3B-A50F-A48BA644A96B</string>
+			<string>C63F5E78-00C1-455B-BA5E-6431E5F69C4D</string>
 		</dict>
 	</dict>
 </dict>
