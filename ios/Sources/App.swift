@@ -165,6 +165,7 @@ struct Dashboard: View {
 
 struct PlanCard: View {
     let plan: EdgeSnapshot.PlanInfo
+    @State private var exactReset = false   // tap → toggle relative ↔ exact reset time
     var body: some View {
         let frac = min(max(plan.fiveHourPct / 100, 0), 1)
         let sev = sevColor(frac)
@@ -184,8 +185,8 @@ struct PlanCard: View {
             HStack(spacing: 8) {
                 if let reset = plan.fiveHourResetEpoch {
                     let rem = max(reset - Date().timeIntervalSince1970, 0)
-                    Label("resets in \(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m", systemImage: "arrow.clockwise")
-                        .font(.claude(12.5)).foregroundColor(T.subtext)
+                    let label = exactReset ? "resets at \(timeStr(reset))" : "resets in \(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m"
+                    Label(label, systemImage: "arrow.clockwise").font(.claude(12.5)).foregroundColor(T.subtext)
                 }
                 Spacer()
                 if let burn = plan.burnPerHour, burn >= 0.5 {
@@ -197,6 +198,8 @@ struct PlanCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(LinearGradient(colors: [Color(hex: 0x302720), Color(hex: 0x211C18)], startPoint: .top, endPoint: .bottom))
@@ -455,6 +458,7 @@ struct StatusPill: View {
 
 struct WeeklyCard: View {
     let plan: EdgeSnapshot.PlanInfo?
+    @State private var exactReset = false
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
@@ -463,11 +467,13 @@ struct WeeklyCard: View {
                 Bar(frac: min(max((plan?.weekPct ?? 0) / 100, 0), 1), color: sevColor((plan?.weekPct ?? 0) / 100))
                 if let reset = plan?.weekResetEpoch {
                     let rem = max(reset - Date().timeIntervalSince1970, 0)
-                    Text("resets in \(Int(rem) / 86400)d \((Int(rem) % 86400) / 3600)h")
+                    Text(exactReset ? "resets \(dayStr(reset))" : "resets in \(Int(rem) / 86400)d \((Int(rem) % 86400) / 3600)h")
                         .font(.claude(11)).foregroundColor(T.subtext)
                 }
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
     }
 }
 
@@ -495,7 +501,11 @@ struct RecentChatsCard: View {
                     Text("no recent chats").font(.claude(12)).foregroundColor(T.subtext)
                 } else {
                     ForEach(chats) { c in
-                        Button { client.openChat(c) } label: {
+                        // Tap → continue the chat ON THE PHONE (loads its real transcript and
+                        // resumes it). Long-press → open it in VS Code/Cursor on the Mac.
+                        NavigationLink {
+                            ChatThreadView(sessionId: c.id, project: c.project, cwd: c.cwd ?? "")
+                        } label: {
                             HStack(spacing: 11) {
                                 Image(systemName: "bubble.left.and.text.bubble.right")
                                     .font(.system(size: 13)).foregroundColor(T.accent2).frame(width: 20)
@@ -505,11 +515,14 @@ struct RecentChatsCard: View {
                                 }
                                 Spacer(minLength: 6)
                                 Text(c.lastActive, style: .relative).font(.claude(10)).foregroundColor(T.subtext)
-                                Image(systemName: "arrow.up.right").font(.system(size: 10)).foregroundColor(T.subtext)
+                                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundColor(T.subtext)
                             }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button { client.openChat(c) } label: { Label("Open in VS Code on Mac", systemImage: "macwindow") }
+                        }
                         if c.id != chats.last?.id { Divider().overlay(T.border) }
                     }
                 }
@@ -520,6 +533,7 @@ struct RecentChatsCard: View {
 
 struct CalendarCard: View {
     let days: [EdgeSnapshot.CalDay]
+    @State private var selected: Int?
     var body: some View {
         let map = Dictionary(uniqueKeysWithValues: days.map { ($0.day, $0.tokens) })
         let cal = Calendar.current
@@ -542,7 +556,14 @@ struct CalendarCard: View {
                 SectionLabel(text: "Days used · \(monthName)")
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(used)").font(.claude(26, .bold)).foregroundColor(T.accent)
-                    Text("of \(today) days").font(.claude(13)).foregroundColor(T.subtext)
+                    // Tap a day to see its usage; otherwise the month summary.
+                    if let s = selected, let u = map[s] {
+                        Text("· \(monthName.prefix(3)) \(s): \(fmtTokens(u)) tokens").font(.claude(13)).foregroundColor(T.text.opacity(0.85))
+                    } else if let s = selected {
+                        Text("· \(monthName.prefix(3)) \(s): no usage").font(.claude(13)).foregroundColor(T.subtext)
+                    } else {
+                        Text("of \(today) days").font(.claude(13)).foregroundColor(T.subtext)
+                    }
                 }
                 VStack(spacing: 4) {
                     HStack(spacing: 4) {
@@ -575,9 +596,12 @@ struct CalendarCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 5).fill(fill)
                     .overlay { if day == today { RoundedRectangle(cornerRadius: 5).strokeBorder(T.accent, lineWidth: 1.4) } }
+                    .overlay { if day == selected { RoundedRectangle(cornerRadius: 5).strokeBorder(.white, lineWidth: 1.6) } }
                 Text("\(day)").font(.claude(10, lvl >= 1 ? .semibold : .regular)).foregroundColor(numColor)
             }
             .frame(maxWidth: .infinity).frame(height: 26)
+            .contentShape(Rectangle())
+            .onTapGesture { if !future { selected = (selected == day ? nil : day) } }   // tap a day for its usage
         }
     }
 }
@@ -662,4 +686,7 @@ struct PairSheet: View {
 func timeStr(_ epoch: Double) -> String {
     let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none
     return f.string(from: Date(timeIntervalSince1970: epoch))
+}
+func dayStr(_ epoch: Double) -> String {
+    Date(timeIntervalSince1970: epoch).formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
 }
