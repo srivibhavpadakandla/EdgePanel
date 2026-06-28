@@ -116,7 +116,7 @@ final class ActivityManager {
             WorkingAttributes.Line(
                 id: w.id, project: w.project, prompt: w.display,
                 startEpoch: w.promptAtEpoch ?? Date().timeIntervalSince1970,
-                tokens: w.turnTokens, freezeAt: freezeAt)
+                tokens: w.turnTokens, agents: w.runningAgents, queued: w.queuedPrompts, freezeAt: freezeAt)
         }
         last = Dictionary(working.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 

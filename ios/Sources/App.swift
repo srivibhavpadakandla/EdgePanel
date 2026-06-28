@@ -382,8 +382,33 @@ struct WorkingRow: View {
                     Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
                 }
             }
+            // Live proof-of-work: subagents running + prompts waiting in line.
+            if w.runningAgents > 0 || w.queuedPrompts > 0 {
+                HStack(spacing: 7) {
+                    if w.runningAgents > 0 {
+                        StatusPill(icon: "person.2.fill", text: "\(w.runningAgents) agent\(w.runningAgents == 1 ? "" : "s") working", color: T.green)
+                    }
+                    if w.queuedPrompts > 0 {
+                        StatusPill(icon: "tray.full.fill", text: "\(w.queuedPrompts) queued", color: T.subtext)
+                    }
+                }
+            }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Small icon+text capsule for live-status badges (agents working / prompts queued).
+struct StatusPill: View {
+    let icon: String, text: String, color: Color
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+            Text(text).font(.claude(10, .semibold))
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .background(Capsule().fill(color.opacity(0.15)))
     }
 }
 

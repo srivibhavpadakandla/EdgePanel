@@ -57,8 +57,14 @@ struct WorkingLiveActivity: Widget {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("“\(p.prompt)”").font(.system(size: 13, design: .serif))
                                     .foregroundColor(.white.opacity(0.9)).lineLimit(2)
-                                Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
-                                    .font(.system(size: 11)).foregroundColor(.gray)
+                                HStack(spacing: 6) {
+                                    Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
+                                        .font(.system(size: 11)).foregroundColor(.gray)
+                                    if let note = workNote(p) {
+                                        Label(note, systemImage: "person.2.fill")
+                                            .font(.system(size: 11, weight: .medium)).foregroundColor(olive)
+                                    }
+                                }
                             }
                         } else {
                             VStack(alignment: .leading, spacing: 5) {
@@ -134,8 +140,9 @@ private struct SessionRow: View {
                 Text(s.start, style: .timer)
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 58, alignment: .trailing)
-                Text(s.tokens == 0 ? "starting…" : "\(fmtTok(s.tokens)) tok")
-                    .font(.system(size: 10)).foregroundColor(.gray)
+                Text(workNote(s).map { "\(fmtTok(s.tokens)) tok · \($0)" }
+                     ?? (s.tokens == 0 ? "starting…" : "\(fmtTok(s.tokens)) tok"))
+                    .font(.system(size: 10)).foregroundColor(s.agents > 0 ? olive : .gray).lineLimit(1)
             }
         }
     }
@@ -167,8 +174,14 @@ struct LockScreenView: View {
             } else if state.count <= 1, let p = state.primary {
                 Text("“\(p.prompt)”").font(.system(size: 13, design: .serif))
                     .foregroundColor(.white.opacity(0.85)).lineLimit(2)
-                Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
-                    .font(.system(size: 11)).foregroundColor(.gray)
+                HStack(spacing: 7) {
+                    Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
+                        .font(.system(size: 11)).foregroundColor(.gray)
+                    if let note = workNote(p) {
+                        Label(note, systemImage: "person.2.fill")
+                            .font(.system(size: 11, weight: .medium)).foregroundColor(olive)
+                    }
+                }
             } else {
                 ForEach(state.sessions.prefix(3)) { SessionRow(s: $0) }
                 if state.count > 3 {
@@ -184,4 +197,12 @@ private func fmtTok(_ t: Int) -> String {
     if t >= 1_000_000 { return String(format: "%.2fM", Double(t) / 1_000_000) }
     if t >= 1_000 { return String(format: "%.1fK", Double(t) / 1_000) }
     return "\(t)"
+}
+
+/// "2 agents · 1 queued" proof-of-work caption, or nil when there's nothing extra to show.
+private func workNote(_ l: WorkingAttributes.Line) -> String? {
+    var parts: [String] = []
+    if l.agents > 0 { parts.append("\(l.agents) agent\(l.agents == 1 ? "" : "s") working") }
+    if l.queued > 0 { parts.append("\(l.queued) queued") }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
 }
