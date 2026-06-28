@@ -32,8 +32,10 @@ final class ChatStore: ObservableObject {
     static let shared = ChatStore()
     @Published var threads: [ChatThread] = []
     @Published var busy: Set<String> = []        // thread ids awaiting a reply
-    @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop)
+    @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop / reattach)
+    @Published var reconnecting: Set<String> = []    // threads whose Mac link dropped (UI hint)
     private var stopping: Set<String> = []           // threads the user asked to stop (streamJob bails next tick)
+    private var activeStreams: Set<String> = []      // threads with a live poll loop (no double-pollers)
 
     private let url: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -90,7 +92,7 @@ final class ChatStore: ObservableObject {
             guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
                 finish(threadId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
-            busyJob[threadId] = jobId
+            busyJob[threadId] = jobId; save()   // persist so a kill/relaunch can reattach to this turn
             await streamJob(jobId, into: threadId)
         }
     }
@@ -140,7 +142,7 @@ final class ChatStore: ObservableObject {
             guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: nil, message: text) else {
                 finish(tempId, .error, "Couldn’t reach your Mac — is EdgePanel running?"); return
             }
-            busyJob[tempId] = jobId
+            busyJob[tempId] = jobId; save()   // persist so a kill/relaunch can reattach to this turn
             await streamJob(jobId, into: tempId)
         }
         return tempId
@@ -148,30 +150,71 @@ final class ChatStore: ObservableObject {
 
     /// Shared streaming poll loop: render the reply token-by-token, adopt the real
     /// session id when it appears, and settle on done/error.
+    /// Poll a running turn to completion, streaming the reply live. RESILIENT: a dropped
+    /// network connection is tolerated (kept "reconnecting", not abandoned), and whenever the
+    /// live job can't deliver — Mac restarted, job evicted, or the app was backgrounded past a
+    /// timeout — the reply is RECOVERED from the session transcript (the source of truth).
     private func streamJob(_ jobId: String, into threadId: String) async {
-        var streamId: UUID?, fails = 0
-        for _ in 0..<1400 {                       // ~12 min at 0.5s
+        guard !activeStreams.contains(threadId) else { return }   // already streaming this thread
+        activeStreams.insert(threadId)
+        defer { activeStreams.remove(threadId) }
+        busyJob[threadId] = jobId; busy.insert(threadId)
+        // Reattach to the in-progress bubble if one already exists (reconnect after foreground).
+        var streamId: UUID? = inProgressBubbleId(threadId)
+        var netFails = 0
+        let deadline = Date().addingTimeInterval(15 * 60)         // generous hard cap
+        while Date() < deadline {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            if stopping.contains(threadId) { stopping.remove(threadId); return }   // user hit Stop → already settled
+            if stopping.contains(threadId) { stopping.remove(threadId); return }   // user hit Stop → settled
             guard let job = await EdgeClient.shared.pollChat(jobId) else {
-                fails += 1                        // unreachable Mac → don't hang busy forever
-                if fails >= 20 { finalize(threadId, streamId, "Lost connection to your Mac.", .error); busyJob[threadId] = nil; return }
+                netFails += 1
+                if netFails == 6 { setReconnecting(threadId, true) }   // ~3s offline → show "reconnecting"
+                if netFails >= 40 {                                    // ~20s offline → try the transcript
+                    if await recoverFromTranscript(threadId) { return }
+                    netFails = 6                                       // still running → keep trying, stay reconnecting
+                }
                 continue
             }
-            fails = 0
+            if netFails > 0 { netFails = 0; setReconnecting(threadId, false) }
             if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
-            if job.status == "running" {
+            switch job.status {
+            case "running":
                 if let partial = job.result, !partial.isEmpty { streamId = upsertStream(threadId, streamId, partial) }
-                continue
-            }
-            if job.status == "done" {
-                finalize(threadId, streamId, job.result ?? "(no reply)", .assistant); busyJob[threadId] = nil; return
-            }
-            if job.status == "error" {
-                finalize(threadId, streamId, job.error ?? "Something went wrong.", .error); busyJob[threadId] = nil; return
+            case "done":
+                finalize(threadId, streamId, job.result ?? "(no reply)", .assistant); return
+            case "gone":   // Mac restarted / job evicted → the finished reply lives in the transcript
+                if await recoverFromTranscript(threadId) { return }
+                finalize(threadId, streamId, "Lost track of this turn on your Mac — it may still be running. Pull to refresh.", .error); return
+            case "error":
+                finalize(threadId, streamId, job.error ?? "Something went wrong.", .error); return
+            default: break
             }
         }
-        finalize(threadId, streamId, "Timed out waiting for a reply.", .error); busyJob[threadId] = nil
+        if await recoverFromTranscript(threadId) { return }
+        finalize(threadId, streamId, "Timed out waiting for a reply.", .error)
+    }
+
+    /// Recover a turn's reply from the session transcript when the live stream couldn't deliver.
+    /// Returns true if the turn is finished there (transcript ends with an assistant reply).
+    @discardableResult
+    private func recoverFromTranscript(_ threadId: String) async -> Bool {
+        guard let t = thread(threadId), let resume = t.resumeId else { return false }
+        let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
+        guard hist.last?.role == "assistant",                      // turn finished iff it ends with a reply
+              let i = threads.firstIndex(where: { $0.id == threadId }) else { return false }
+        threads[i].messages = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
+        threads[i].updatedAt = Date(); threads.sort { $0.updatedAt > $1.updatedAt }
+        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId); save()
+        return true
+    }
+
+    private func setReconnecting(_ id: String, _ on: Bool) {
+        if on { reconnecting.insert(id) } else { reconnecting.remove(id) }
+    }
+    /// The in-progress assistant bubble for a busy thread (its trailing assistant message), if any.
+    private func inProgressBubbleId(_ threadId: String) -> UUID? {
+        guard let last = thread(threadId)?.messages.last, last.role == .assistant else { return nil }
+        return last.id
     }
 
     private func adopt(_ threadId: String, sessionId: String) {
@@ -204,7 +247,7 @@ final class ChatStore: ObservableObject {
             threads[i].updatedAt = Date()
             threads.sort { $0.updatedAt > $1.updatedAt }
         }
-        busy.remove(id); busyJob[id] = nil; save()
+        busy.remove(id); busyJob[id] = nil; reconnecting.remove(id); save()
     }
 
     private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
@@ -218,9 +261,13 @@ final class ChatStore: ObservableObject {
     }
 
     private var pendingSave: Task<Void, Never>?
+    private let busyKey = "edgepanel.busyJobs"
     /// Debounced, off-main persistence — was a synchronous main-actor disk write on every
     /// streamed token (a write storm). Coalesce: capture state now, write ~0.6s later.
+    /// busyJob is persisted too (synchronously, it's tiny) so a relaunch can reattach to an
+    /// in-flight turn instead of losing the reply.
     private func save() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(busyJob), forKey: busyKey)
         pendingSave?.cancel()
         let snapshot = threads, u = url
         pendingSave = Task.detached(priority: .utility) {
@@ -232,6 +279,20 @@ final class ChatStore: ObservableObject {
     private func load() {
         if let d = try? Data(contentsOf: url), let t = try? JSONDecoder().decode([ChatThread].self, from: d) {
             threads = t.sorted { $0.updatedAt > $1.updatedAt }
+        }
+        if let d = UserDefaults.standard.data(forKey: busyKey),
+           let b = try? JSONDecoder().decode([String: String].self, from: d) {
+            // Reattach to turns that were in flight when the app was last killed.
+            busyJob = b.filter { kv in threads.contains { $0.id == kv.key } }
+            busy = Set(busyJob.keys)
+        }
+    }
+
+    /// Re-attach to every in-flight turn (after a relaunch or returning to the foreground):
+    /// resume polling its job, and if the job is gone, recover the reply from the transcript.
+    func reconnectInFlight() {
+        for (threadId, jobId) in busyJob where !activeStreams.contains(threadId) {
+            Task { await streamJob(jobId, into: threadId) }
         }
     }
 }
@@ -486,6 +547,14 @@ struct ChatThreadView: View {
                             }.padding(.trailing, 14).padding(.bottom, 8)
                         }
                     }
+                }
+                if store.reconnecting.contains(sessionId) {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.small).tint(T.amber)
+                        Text("Reconnecting to your Mac… your reply is safe").font(.claude(12, .medium)).foregroundColor(T.amber)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                    .background(T.amber.opacity(0.10))
                 }
                 if !busy, messages.last?.role == .error {
                     Button { store.retryLast(sessionId) } label: {

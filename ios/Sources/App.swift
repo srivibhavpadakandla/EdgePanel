@@ -93,6 +93,7 @@ struct RootView: View {
         .onAppear {
             ActivityManager.shared.requestNotifications()
             if client.token.isEmpty { showPair = true } else { client.start() }
+            ChatStore.shared.reconnectInFlight()   // reattach to turns that were running when last killed
         }
         // Reconcile the moment the app returns to the foreground, so a stale "still
         // counting" Live Activity self-heals instantly on open.
@@ -101,6 +102,7 @@ struct RootView: View {
                 ActivityManager.shared.resendActivityToken()   // re-arm push end after a Mac restart
                 UIApplication.shared.registerForRemoteNotifications()  // re-seed the device token too
                 Task { await client.poll() }
+                ChatStore.shared.reconnectInFlight()   // resume any in-flight remote turn (iOS suspended its poll)
             }
         }
     }
