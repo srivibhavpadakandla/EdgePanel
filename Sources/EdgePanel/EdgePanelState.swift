@@ -380,6 +380,18 @@ final class EdgePanelState: ObservableObject {
         if let m = d.dictionary(forKey: "edgepanel.activityTokens") as? [String: String] { activityPushTokens = m }
         pushToStartToken = d.string(forKey: "edgepanel.startToken")
         devicePushToken = d.string(forKey: "edgepanel.deviceToken")
+        // When APNs reports a Live Activity / push-to-start token as permanently dead
+        // (410 — the Island ended or the app was reinstalled), drop it so we stop hammering
+        // it every ~10s and a fresh token (sent when the app next runs) drives the next Island.
+        APNsPusher.shared.onInvalidToken = { [weak self] token, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                for (k, v) in self.activityPushTokens where v == token { self.activityPushTokens[k] = nil }
+                if self.pushToStartToken == token { self.pushToStartToken = nil }
+                self.lastPushedWorkingIds = []     // re-push/start cleanly when a token next arrives
+                self.savePushTokens()
+            }
+        }
     }
     private func savePushTokens() {
         let d = UserDefaults.standard

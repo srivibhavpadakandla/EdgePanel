@@ -305,6 +305,7 @@ struct ChatListView: View {
     @State private var showNew = false
     @State private var showPanic = false
     @State private var openId: String?
+    @State private var pendingOpenId: String?
     @State private var renameId: String?
     @State private var renameText = ""
     var body: some View {
@@ -363,11 +364,16 @@ struct ChatListView: View {
             }
         }
         .tint(T.accent)
-        .sheet(isPresented: $showNew) {
-            // Dismiss the sheet first, then push the new thread (avoids a present/push race).
+        // Open the new thread in onDismiss — i.e. AFTER the sheet is fully gone — so the
+        // navigation push can't race the sheet's dismissal and silently no-op (which looked
+        // like "starting a new chat does nothing"). The thread is already created, so even if
+        // anything went wrong it's still visible at the top of the list.
+        .sheet(isPresented: $showNew, onDismiss: {
+            if let id = pendingOpenId { pendingOpenId = nil; openId = id }
+        }) {
             NewTaskSheet { id in
+                pendingOpenId = id
                 showNew = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { openId = id }
             }.environmentObject(client)
         }
     }

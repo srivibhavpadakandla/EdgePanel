@@ -43,6 +43,11 @@ final class APNsPusher: @unchecked Sendable {
 
     var enabled: Bool { config != nil }
 
+    /// Fired when APNs rejects a token as permanently dead (410 Unregistered/ExpiredToken,
+    /// or 400 BadDeviceToken) — the Live Activity ended or the app was reinstalled. The owner
+    /// drops the token so it stops being hammered and a FRESH push-to-start can take over.
+    var onInvalidToken: ((_ token: String, _ pushType: String) -> Void)?
+
     /// Push a Live Activity event ("update" or "end") to a per-activity token.
     func pushActivity(token: String, event: String, contentState: [String: Any], alert: [String: Any]? = nil) {
         guard let config else { return }
@@ -113,6 +118,12 @@ final class APNsPusher: @unchecked Sendable {
             } else {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? err?.localizedDescription ?? ""
                 NSLog("APNs \(pushType) push FAILED: HTTP \(code) \(body)")   // e.g. BadDeviceToken / TopicDisallowed / ExpiredProviderToken
+                // 410 (Unregistered/ExpiredToken) or 400 BadDeviceToken = the token is dead
+                // for good — drop it so we stop spamming a stale Live Activity every ~10s and
+                // let a fresh push-to-start create the next Island.
+                if code == 410 || (code == 400 && body.contains("BadDeviceToken")) {
+                    self.onInvalidToken?(token, pushType)
+                }
             }
         }.resume()
     }
