@@ -43,12 +43,15 @@ final class ChatStore: ObservableObject {
     }()
     init() { load() }
 
-    func thread(_ id: String) -> ChatThread? { threads.first { $0.id == id } }
+    // Match by stable id OR adopted sessionId: a new-task thread keeps id "new-…" but adopts
+    // the real session id, so opening it from WORKING NOW (keyed by session id) must find it
+    // instead of spawning a duplicate.
+    func thread(_ id: String) -> ChatThread? { threads.first { $0.id == id || $0.sessionId == id } }
 
     /// Open (or create) the thread for a real session and pull its live history
     /// from the Mac so you see the conversation that's on your PC.
     func open(sessionId: String, project: String, cwd: String) {
-        if let i = threads.firstIndex(where: { $0.id == sessionId }) {
+        if let i = threads.firstIndex(where: { $0.id == sessionId || $0.sessionId == sessionId }) {
             threads[i].project = project
             if !cwd.isEmpty { threads[i].cwd = cwd }
             if threads[i].sessionId == nil, !sessionId.hasPrefix("new-") { threads[i].sessionId = sessionId }
@@ -126,7 +129,10 @@ final class ChatStore: ObservableObject {
     /// `stopping` and bails on its next tick without overwriting the stopped state.
     func stop(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }
-        stopping.insert(id)
+        // Only arm the bail flag if a loop can actually consume it — a live streamJob
+        // (activeStreams) or the send→streamJob await window (busy). Otherwise it would leak
+        // an entry in `stopping` that nothing ever removes.
+        if activeStreams[id] != nil || busy.contains(id) { stopping.insert(id) }
         activeStreams[id] = nil   // free the stream slot NOW so a quick Retry isn't dropped by the activeStreams guard
         busy.remove(id); busyJob[id] = nil
         if let i = threads.firstIndex(where: { $0.id == id }),
@@ -189,6 +195,12 @@ final class ChatStore: ObservableObject {
                 }
                 continue
             }
+            // Stop landed DURING this poll await → settle, don't resurrect the reply onto a
+            // thread the user already stopped.
+            if stopping.contains(threadId) { stopping.remove(threadId); return }
+            // A Stop-then-Retry reassigned this thread's slot to a newer stream → this loop is
+            // stale; exit without touching the new loop's stop flag.
+            if activeStreams[threadId] != streamToken { return }
             if netFails > 0 { netFails = 0; setReconnecting(threadId, false) }
             if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
             switch job.status {
@@ -205,7 +217,13 @@ final class ChatStore: ObservableObject {
             }
         }
         if await recoverFromTranscript(threadId) { return }
-        finalize(threadId, streamId, "Timed out waiting for a reply.", .error)
+        // Don't clobber visible streamed text with the timeout error — if the bubble already
+        // holds a real partial answer, keep it and append a separate marker (as stop() does);
+        // only reuse the bubble if it's empty.
+        let keepPartial = streamId.flatMap { sid in
+            thread(threadId)?.messages.first(where: { $0.id == sid })?.text.isEmpty == false
+        } ?? false
+        finalize(threadId, keepPartial ? nil : streamId, "Timed out waiting for a reply.", .error)
     }
 
     /// Recover a turn's reply from the session transcript when the live stream couldn't deliver.
@@ -276,7 +294,8 @@ final class ChatStore: ObservableObject {
     }
     func delete(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }   // kill the Mac claude process
-        stopping.insert(id); activeStreams[id] = nil                            // streamJob loop bails next tick
+        if activeStreams[id] != nil || busy.contains(id) { stopping.insert(id) }  // arm bail only if a loop consumes it
+        activeStreams[id] = nil                                                  // streamJob loop bails next tick
         threads.removeAll { $0.id == id }
         busy.remove(id); busyJob[id] = nil                                       // drop the orphan job before save()
         save()

@@ -184,10 +184,12 @@ final class EdgePanelState: ObservableObject {
     /// auto-allowed so the panel only interrupts for writes and dangerous actions.
     func requestDecision(for event: HookEvent) async -> PermissionVerdict {
         let assessment = RiskEngine.assess(toolName: event.toolName, event: event, cwd: event.cwd)
-        // Don't interrupt for plainly read-only actions.
-        if assessment.level == .read { return .allow }
-        // Panic Stop window → refuse everything that isn't read-only.
+        // Panic Stop window → refuse EVERYTHING, reads included: the user hit Panic because
+        // damage is in progress. The native flow re-asks once the 10s window clears, so benign
+        // reads are only briefly frozen. (Consulted BEFORE the read short-circuit on purpose.)
         if panicArmed { return .deny }
+        // Don't interrupt for plainly read-only actions (outside a panic).
+        if assessment.level == .read { return .allow }
         // Autonomous mode → auto-allow hands-off, EXCEPT the irreversible 1% (rm -rf,
         // force-push to a protected branch, curl|sh, publish, disk writes…) which still
         // surfaces for one tap even when auto-approving. (Guardian Auto-Approve.)
@@ -410,6 +412,7 @@ final class EdgePanelState: ObservableObject {
                 guard let self else { return }
                 for (k, v) in self.activityPushTokens where v == token { self.activityPushTokens[k] = nil }
                 if self.pushToStartToken == token { self.pushToStartToken = nil }
+                if self.devicePushToken == token { self.devicePushToken = nil }   // dead device token → stop targeting it
                 self.lastPushedWorkingIds = []     // re-push/start cleanly when a token next arrives
                 self.savePushTokens()
             }

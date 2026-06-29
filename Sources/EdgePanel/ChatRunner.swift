@@ -79,11 +79,12 @@ final class ChatRunner: @unchecked Sendable {
             self.lock.unlock()
             if cancelNow { p.terminate() }
             // Hard cap the turn; terminating EOFs the pipe so the read loop below exits. Also
-            // close the stdout read end so a leaked tool child that inherited the write end (and
-            // exited claude already, so p.isRunning is false) can't pin the read loop forever —
-            // closing forces availableData to return empty, the loop breaks, finish() runs and
-            // releases the per-session in-flight lock instead of wedging the session.
-            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; try? out.fileHandleForReading.close() }
+            // close the stdout READ FD so a leaked tool child that inherited the write end (and
+            // exited claude already, so p.isRunning is false) can't pin the read loop forever.
+            // We close the raw fd (not FileHandle.close()) and read via POSIX read() below, so a
+            // close racing a blocked read returns -1/EBADF — NOT an uncatchable ObjC exception.
+            let outFD = out.fileHandleForReading.fileDescriptor
+            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; close(outFD) }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
             // Drain stderr concurrently (surfaces a real failure reason on the phone).
             var errData = Data(); let errSem = DispatchSemaphore(value: 0)
@@ -116,13 +117,14 @@ final class ChatRunner: @unchecked Sendable {
                 default: break
                 }
             }
-            // Read stdout line-by-line as it streams (availableData blocks until data/EOF).
-            let handle = out.fileHandleForReading
+            // Read stdout line-by-line as it streams, via POSIX read() on the raw fd so the
+            // watchdog's close(outFD) unblocks us with -1/EBADF instead of crashing.
             var buffer = Data()
+            var rbuf = [UInt8](repeating: 0, count: 65536)
             while true {
-                let chunk = handle.availableData
-                if chunk.isEmpty { break }
-                buffer.append(chunk)
+                let n = rbuf.withUnsafeMutableBytes { read(outFD, $0.baseAddress, 65536) }
+                if n <= 0 { break }   // 0 = EOF, -1 = closed/error
+                buffer.append(contentsOf: rbuf[0..<n])
                 while let nl = buffer.firstIndex(of: 0x0A) {
                     let line = buffer.subdata(in: buffer.startIndex..<nl)
                     buffer.removeSubrange(buffer.startIndex...nl)

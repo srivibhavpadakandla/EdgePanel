@@ -163,8 +163,22 @@ public enum RiskEngine {
         }
         // git push — force to a protected branch is the scary one.
         if cmd.contains("git push") {
-            let force = cmd.contains("--force") || cmd.range(of: #"\s-f(\s|$)"#, options: .regularExpression) != nil || cmd.contains("+")
-            let protected = cmd.contains("main") || cmd.contains("master") || cmd.contains("prod") || cmd.contains("release")
+            // Force = --force / --force-with-lease / -f / a `+refspec` (anchored to a token
+            // start, so a stray '+' elsewhere — e.g. "c++-rewrite" — isn't a false positive).
+            let force = cmd.contains("--force") || cmd.contains("--force-with-lease")
+                || cmd.range(of: #"\s-f(\s|$)"#, options: .regularExpression) != nil
+                || cmd.range(of: #"(^|\s)\+[\w./-]+"#, options: .regularExpression) != nil
+            // Protected = a WHOLE ref token equal to a protected branch (so "prod-spike" or
+            // "maintenance" don't match), checking the destination of a src:dst refspec too.
+            let protectedRefs: Set<String> = ["main", "master", "prod", "production", "release"]
+            let refTokens = cmd.split(whereSeparator: { " \t".contains($0) })
+                .map(String.init).filter { !$0.hasPrefix("-") && $0 != "git" && $0 != "push" }
+                .flatMap { tok -> [String] in
+                    let t = tok.hasPrefix("+") ? String(tok.dropFirst()) : tok
+                    let parts = t.split(separator: ":").map(String.init)
+                    return parts.map { ($0 as NSString).lastPathComponent }   // refs/heads/main → main
+                }
+            let protected = refTokens.contains { protectedRefs.contains($0) }
             if force && protected { return red("force-push to a protected branch", always: true) }
             if force { return red("force-push") }
             return amber("pushes to a remote")
@@ -210,6 +224,13 @@ public enum RiskEngine {
         if cmd.contains("git commit") || cmd.contains("git merge") || cmd.contains("git rebase") || cmd.contains("mv ") || cmd.contains("> ") {
             return amber("modifies files / history")
         }
+        // Credential / persistence files are exfiltration (read) or persistence (write) no
+        // matter which shell utility touches them (cat/cp/base64/…) — assessFile only guards
+        // the first-party File tools, so without this a Bash `cat ~/.ssh/id_rsa` would fall
+        // through to .read and be silently auto-allowed, bypassing the Guardian. cmd is lowercased.
+        if Self.touchesSensitivePath(cmd) {
+            return red("touches a credential/persistence file", always: true)
+        }
         return RiskAssessment(level: .read, reason: "safe command", alwaysDangerous: false)
     }
 
@@ -238,7 +259,8 @@ public enum RiskEngine {
             let next = lower[lower.index(lower.startIndex, offsetBy: full.count)]
             return next == "/" || next == "."
         }
-        let sensitiveUser = underHome("/.ssh") || underHome("/library/launchagents") || underHome("/library/launchdaemons")
+        let sensitiveUser = underHome("/.ssh") || underHome("/.aws") || underHome("/.gnupg")
+            || underHome("/library/launchagents") || underHome("/library/launchdaemons")
             || underHome("/.claude/settings") || underHome("/.zshrc") || underHome("/.zprofile") || underHome("/.zshenv")
             || underHome("/.bashrc") || underHome("/.bash_profile") || underHome("/.profile")
             || lower.hasPrefix("/private/var/at/tabs")
@@ -255,6 +277,26 @@ public enum RiskEngine {
             return RiskAssessment(level: .write, reason: inWorkspace ? "edits a project file" : "writes outside the workspace", alwaysDangerous: false)
         }
         return RiskAssessment(level: .read, reason: inWorkspace ? "reads a project file" : "reads outside the workspace", alwaysDangerous: false)
+    }
+
+    /// Does a (lowercased) shell command reference a credential / persistence file? Matches
+    /// the same set assessFile guards — tilde, $HOME, and absolute-home forms — boundary-aware
+    /// so a sibling like ~/.ssh_notes isn't flagged.
+    private static func touchesSensitivePath(_ cmd: String) -> Bool {
+        let home = NSHomeDirectory().lowercased()
+        let rels = ["/.ssh", "/.aws", "/.gnupg", "/.claude/settings", "/.zshrc", "/.zprofile",
+                    "/.zshenv", "/.bashrc", "/.bash_profile", "/.profile",
+                    "/library/launchagents", "/library/launchdaemons"]
+        func hit(_ rel: String) -> Bool {
+            for base in ["~" + rel, "$home" + rel, home + rel] {
+                guard let r = cmd.range(of: base) else { continue }
+                let after = cmd[r.upperBound...].first
+                if after == nil || after == "/" || after == "." || after == " " || after == "\"" || after == "'" { return true }
+            }
+            return false
+        }
+        if rels.contains(where: hit) { return true }
+        return cmd.range(of: #"(^|\s|=|"|')/(etc|private/etc|private/var/at/tabs)\b"#, options: .regularExpression) != nil
     }
 
     private static func red(_ reason: String, always: Bool = false) -> RiskAssessment {

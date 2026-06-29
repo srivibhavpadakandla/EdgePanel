@@ -93,7 +93,12 @@ public enum TranscriptReader {
 
     private static func intValue(_ any: Any?) -> Int {
         if let i = any as? Int { return i }
-        if let d = any as? Double { return Int(d) }
+        if let d = any as? Double {   // guard the Int(d) trap on a huge/non-finite token value
+            guard d.isFinite else { return 0 }
+            if d >= Double(Int.max) { return Int.max }
+            if d <= Double(Int.min) { return Int.min }
+            return Int(d)
+        }
         if let n = any as? NSNumber { return n.intValue }
         return 0
     }

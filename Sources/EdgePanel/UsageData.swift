@@ -793,6 +793,12 @@ extension UsageLoader {
            let att = o["attachment"] as? [String: Any],
            (att["type"] as? String) == "queued_command",
            (att["commandMode"] as? String) != "bash" {
+            // The prompt can be a plain String (not just a block array) — handle that shape too,
+            // else a string-form queued prompt is dropped and WORKING NOW freezes on the old turn.
+            if let s = att["prompt"] as? String {
+                let tt = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (tt.isEmpty || injected.contains { tt.hasPrefix($0) }) ? nil : tt
+            }
             let blocks = att["prompt"] as? [[String: Any]] ?? []
             let texts = blocks.compactMap { b -> String? in
                 guard (b["type"] as? String) == "text", let t = b["text"] as? String else { return nil }
@@ -825,7 +831,12 @@ extension UsageLoader {
     }
     private static func intVal(_ a: Any?) -> Int {
         if let i = a as? Int { return i }
-        if let d = a as? Double { return Int(d) }
+        if let d = a as? Double {   // guard the Int(d) trap on a huge/non-finite token value
+            guard d.isFinite else { return 0 }
+            if d >= Double(Int.max) { return Int.max }
+            if d <= Double(Int.min) { return Int.min }
+            return Int(d)
+        }
         if let n = a as? NSNumber { return n.intValue }
         return 0
     }
