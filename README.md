@@ -29,9 +29,13 @@ Slam your cursor to the right edge of the screen and EdgePanel slides in. Move a
 
 ## Screenshots
 
-| Desktop panel | Multi-chat mode/effort | iPhone | Dynamic Island |
-|---|---|---|---|
-| ![panel](docs/panel.png) | ![grouped](docs/mode-grouped.png) | ![ios](docs/ios-dashboard.png) | ![island](docs/dynamic-island.png) |
+| Desktop panel | Multi-chat mode/effort | Dynamic Island |
+|---|---|---|
+| ![panel](docs/panel.png) | ![grouped](docs/mode-grouped.png) | ![island](docs/dynamic-island.png) |
+
+| iPhone dashboard | Phone command center (chat → your editor) |
+|---|---|
+| ![ios](docs/ios-dashboard.png) | ![command](docs/ios-command.png) |
 
 ## Requirements
 
@@ -117,6 +121,8 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 **Reaching the Mac.** On a home network with no client isolation, the LAN IP just works. But many routers (and phone hotspots) **isolate clients**, so the phone can't see the Mac even on the same Wi-Fi — and the LAN IP never works off-network. The robust fix is [Tailscale](https://tailscale.com): install on both, sign in with the same account, and pair to the Mac's `100.x` tailnet IP. Then it works on any Wi-Fi *and* cellular, end-to-end encrypted. Launch the Mac app with `EDGEPANEL_PAIR_HOST=100.x.x.x:8788` so the QR encodes the tailnet address. (ATS note: the Tailscale `100.64/10` range is *not* "local networking" to iOS, so the Info.plist uses `NSAllowsArbitraryLoads` **alone** — adding `NSAllowsLocalNetworking` would make iOS ignore it and block the connection.)
 
 ### Talk to Claude Code from your phone
+
+![Phone command center](docs/ios-command.png)
 
 - **Continue your live editor session.** Message the chat that's open in VS Code/Cursor and EdgePanel **types it straight into that chat** — focus the Claude Code input, paste, submit, then **verify it landed in the transcript and retry** if the synthetic keystroke didn't take. The reply happens in your editor and is streamed back to the phone.
 - **Or run a session headless.** For an idle/away session (or a brand-new task), the Mac runs `claude -p --resume … --output-format stream-json` and relays the reply **token-by-token** to the phone, with a Stop button. The session transcript is the source of truth, so a dropped connection or app kill recovers the reply instead of losing it.
