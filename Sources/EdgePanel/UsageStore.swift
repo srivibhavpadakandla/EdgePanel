@@ -103,11 +103,18 @@ final class UsageStore: ObservableObject {
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshSessions() }
     }
 
+    /// Fires when the live permission mode (read from the active transcript) changes,
+    /// so the state/mascot/ModeCard reflect the mode you actually set in Claude Code.
+    var onModeChanged: ((String) -> Void)?
+    private var lastMode: String?
+
     func refreshSessions() {
         let gen = nextSessionGen()
         sessionQ.async {
             let sessions = UsageLoader.activeSessions()
+            let mode = UsageLoader.currentPermissionMode()
             DispatchQueue.main.async {
+                if let mode, mode != self.lastMode { self.lastMode = mode; self.onModeChanged?(mode) }
                 guard gen > self.appliedSessionGen else { return }   // a fresher scan already applied — drop this stale one
                 self.appliedSessionGen = gen
                 self.sessions = sessions

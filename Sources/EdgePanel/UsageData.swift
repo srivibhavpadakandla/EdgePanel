@@ -621,6 +621,47 @@ extension UsageLoader {
         return nil
     }
 
+    /// The permission mode of the session you're actually using — the latest `permissionMode`
+    /// (carried on user records) in the most-recent interactive editor/CLI transcript. This is
+    /// the real source of truth: hook `/event` only fires for projects wired with the http hook,
+    /// so without this EdgePanel defaults to "ask" no matter your actual mode.
+    static func currentPermissionMode() -> String? {
+        let base = projectsBase()
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+        let now = Date()
+        var cands: [(url: URL, date: Date)] = []
+        while let u = en.nextObject() as? URL {
+            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
+            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(mod) <= 600 { cands.append((u, mod)) }
+        }
+        cands.sort { $0.date > $1.date }
+        for c in cands.prefix(8) where isInteractiveSession(c.url) {
+            // permissionMode rides user records. A single turn can emit megabytes of tool
+            // output, so a small tail misses the last prompt — read a generous tail for the
+            // LATEST mode, and fall back to the HEAD (the session's first user record always
+            // carries one) so we never default to "ask" just because the turn is long.
+            var mode: String?
+            if let tail = tailString(c.url, maxBytes: 6_000_000) {
+                for line in tail.split(separator: "\n", omittingEmptySubsequences: true) {
+                    if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                       let m = o["permissionMode"] as? String, !m.isEmpty { mode = m }   // keep the latest
+                }
+            }
+            if mode == nil, let fh = try? FileHandle(forReadingFrom: c.url) {
+                let head = (try? fh.read(upToCount: 262_144)) ?? Data()
+                try? fh.close()
+                for line in String(decoding: head, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true) {
+                    if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                       let m = o["permissionMode"] as? String, !m.isEmpty { mode = m; break }   // first = session start
+                }
+            }
+            if let mode { return mode }
+        }
+        return nil
+    }
+
     /// True if the transcript belongs to an interactive editor/CLI session (entrypoint
     /// present and NOT the automated "sdk-cli"). Cheap head read.
     private static func isInteractiveSession(_ url: URL) -> Bool {
@@ -945,6 +986,38 @@ extension UsageLoader {
             }
         }
         return Array(out.suffix(limit))
+    }
+
+    /// Whether the given session's CURRENT turn has finished — a terminal assistant message
+    /// (stop_reason end_turn/stop_sequence/max_tokens) exists after the last typed user prompt.
+    /// Used by the live-inject watcher to know when an injected message's reply is complete.
+    /// Returns true when the file can't be read (treat unknown as "not generating").
+    static func sessionTurnComplete(sessionId: String, cwd: String = "") -> Bool {
+        let base = projectsBase()
+        var url: URL?
+        if !cwd.isEmpty {
+            let encoded = String(cwd.map { ($0.isLetter || $0.isNumber) ? $0 : "-" })
+            let candidate = base.appendingPathComponent(encoded).appendingPathComponent("\(sessionId).jsonl")
+            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+        }
+        if url == nil, let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: nil) {
+            while let u = en.nextObject() as? URL {
+                if u.lastPathComponent == "\(sessionId).jsonl" { url = u; break }
+            }
+        }
+        guard let url, let text = tailString(url, maxBytes: 4_000_000) else { return true }
+        let objs = text.split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+        var boundary = -1
+        for (i, o) in objs.enumerated() where userPromptText(o) != nil { boundary = i }
+        var lastTerminal = -1
+        for (i, o) in objs.enumerated() {
+            guard (o["type"] as? String) == "assistant",
+                  let m = o["message"] as? [String: Any],
+                  let sr = m["stop_reason"] as? String else { continue }
+            if sr == "end_turn" || sr == "stop_sequence" || sr == "max_tokens" { lastTerminal = i }
+        }
+        return boundary < 0 || lastTerminal > boundary
     }
 
     private static let headCwdLock = NSLock()

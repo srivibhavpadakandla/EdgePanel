@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seamless Dynamic Island: push the aggregate state (end/update) when the set
         // of working chats changes, so the Island stops the instant a turn finishes.
         store.onWorkingChanged = { [weak self] w in self?.state.pushAggregate(working: w) }
+        store.onModeChanged = { [weak self] m in self?.state.permissionMode = m }
 
         startServer()
         startLANServer()
@@ -227,11 +228,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let cwd = obj["cwd"] as? String ?? ""
                 let sid = obj["sessionId"] as? String
-                // Always run a reliable streaming `claude -p [--resume]` turn — the reply
-                // streams straight back to the phone. (The fragile "type into the live VS
-                // Code chat" path was removed: Electron honors synthetic keystrokes too
-                // inconsistently to depend on.)
-                switch ChatRunner.shared.start(cwd: cwd, sessionId: sid, message: msg) {
+                // If the target is the session you're LIVE in (open in VS Code / Cursor), type
+                // the message straight into that chat so the conversation continues in your
+                // editor — instead of forking a separate `claude -p` that can't see it. The
+                // reply is watched out of the session transcript and streamed back the same way.
+                // Any other session (idle/away, or a new task) → reliable headless streaming.
+                let liveInject = (sid?.isEmpty == false)
+                    && sid == UsageLoader.mostRecentInteractiveSessionId()
+                    && EditorInjector.shared.available
+                let result = liveInject
+                    ? ChatRunner.shared.startInject(cwd: cwd, sessionId: sid!, message: msg)
+                    : ChatRunner.shared.start(cwd: cwd, sessionId: sid, message: msg)
+                switch result {
                 case .started(let jid):
                     return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
                                         body: Data("{\"jobId\":\"\(jid)\"}".utf8))

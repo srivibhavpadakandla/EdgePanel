@@ -168,6 +168,53 @@ final class ChatRunner: @unchecked Sendable {
         return .started(jid)
     }
 
+    /// Deliver a phone message into the LIVE editor session by typing it into VS Code/Cursor
+    /// (instead of forking `claude -p`, which can't see the running chat), then watch that
+    /// session's transcript for the assistant reply so the phone still gets it streamed back
+    /// via the SAME jobId/poll contract — the iOS app needs no changes.
+    func startInject(cwd: String, sessionId: String, message: String) -> StartResult {
+        guard EditorInjector.shared.available else { return .unavailable }
+        lock.lock()
+        // One in-flight inject per session — a second would interleave into the same chat.
+        if resuming.contains(sessionId) { lock.unlock(); return .busy }
+        counter += 1; let jid = "c\(counter)"; jobs[jid] = Job(status: "running")
+        resuming.insert(sessionId); jobSession[jid] = sessionId
+        lock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async { [maxRuntime] in
+            // Baseline assistant-message count BEFORE injecting, so we can tell the new reply
+            // apart from existing history in the transcript.
+            let baseAssistants = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
+                .filter { $0.role == "assistant" }.count
+            guard EditorInjector.shared.inject(text: message) else {
+                self.finish(jid, Job(status: "error",
+                    error: "couldn't deliver to your editor — open the Claude Code chat in VS Code/Cursor and try again"))
+                return
+            }
+            // Watch the transcript: stream the growing reply into job.result, finish when the
+            // turn completes (terminal assistant after the prompt) or the reply goes stable.
+            let deadline = Date().addingTimeInterval(maxRuntime)
+            var lastText = "", sawReply = false, stable = 0
+            while Date() < deadline {
+                usleep(1_200_000)
+                let assistants = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
+                    .filter { $0.role == "assistant" }
+                guard assistants.count > baseAssistants, let reply = assistants.last?.text, !reply.isEmpty else { continue }
+                sawReply = true
+                if reply != lastText { lastText = reply; stable = 0; self.update(jid, partial: reply, sessionId: sessionId) }
+                else { stable += 1 }
+                // Done when the turn is complete, or the reply has been stable ~6s (covers
+                // completion detection lagging the transcript flush).
+                if UsageLoader.sessionTurnComplete(sessionId: sessionId, cwd: cwd) || stable >= 5 {
+                    self.finish(jid, Job(status: "done", result: lastText, sessionId: sessionId)); return
+                }
+            }
+            if sawReply { self.finish(jid, Job(status: "done", result: lastText, sessionId: sessionId)) }
+            else { self.finish(jid, Job(status: "error", error: "delivered to your editor, but didn't see a reply in time")) }
+        }
+        return .started(jid)
+    }
+
     func poll(_ jid: String) -> Job? { lock.lock(); defer { lock.unlock() }; return jobs[jid] }
 
     /// Stop a running turn (from the phone). Terminating the process EOFs its pipe, so

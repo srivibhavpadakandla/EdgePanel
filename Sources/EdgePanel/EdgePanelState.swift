@@ -566,10 +566,11 @@ final class EdgePanelState: ObservableObject {
     func pushAggregate(working rawWorking: [LiveSession]) {
         endsThisScan = 0   // this scan's ends are already baked into lastFinishedDetail; clear for the next scan
         guard APNsPusher.shared.enabled else { return }
-        // Editor sessions you're physically watching never drive the Island (it'd never stop
-        // while you work at the Mac) — only remote/non-editor work does, so the Island ends
-        // when THAT finishes even if your editor session is still going.
-        let working = rawWorking.filter { !$0.isEditor }
+        // Drive the Island from ALL working sessions, including the editor session you're
+        // watching at the Mac — the user wants to see their work on the phone. It still ends
+        // correctly: a session leaves `working` the instant its turn completes (turnComplete),
+        // so the Island flips to done + tears down via the empty-tick debounce below.
+        let working = rawWorking
         let ids = Set(working.map { $0.id })
         let membershipChanged = ids != lastPushedWorkingIds
 
@@ -653,10 +654,10 @@ final class EdgePanelState: ObservableObject {
     /// Push an "end" Live Activity update + alert when a session finishes — so the
     /// phone updates even if the app is closed. No-op unless APNs is configured.
     func pushSessionEnded(_ s: LiveSession) {
-        // Editor sessions (claude-vscode/desktop) are watched at the Mac — they drive NEITHER the
-        // Island done-caption NOR a phone "finished" push (you don't need a ping for your own
-        // on-screen turn). Bail entirely so the alert below doesn't fire for them either.
-        guard !s.isEditor else { return }
+        // Editor sessions (claude-vscode/desktop) now ALSO send a "finished" push so you get
+        // notified on the phone when a turn you started at the Mac completes. The phone
+        // suppresses the banner while its app is foreground (willPresent), so you're only
+        // pinged when you're actually away from / not looking at the phone.
         let elapsed = s.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
         let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
         let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
