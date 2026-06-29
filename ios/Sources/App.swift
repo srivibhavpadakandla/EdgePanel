@@ -279,7 +279,7 @@ struct ModeCard: View {
         .init(key: "auto",   label: "Auto",   icon: "bolt.fill"),
         .init(key: "bypass", label: "Bypass", icon: "infinity"),
     ]
-    private let efforts = ["low", "medium", "high", "ultra"]
+    private let efforts = ["low", "medium", "high", "xhigh", "max"]
 
     private var tint: Color {
         if risk == "danger" { return T.red }
@@ -339,19 +339,23 @@ struct ModeCard: View {
                     Capsule().fill(idx != nil && i <= idx! ? tint : T.track).frame(height: 5)
                 }
             }
-            Text(idx != nil ? lvl.capitalized : "—")
+            Text(idx != nil ? effortLabel(lvl) : "—")
                 .font(.claude(11, .semibold))
                 .foregroundColor(idx != nil ? tint : T.subtext)
-                .frame(width: 52, alignment: .trailing)
+                .frame(width: 58, alignment: .trailing)
         }
     }
     private func normEffort(_ e: String) -> String {
         let s = e.lowercased()
-        if s.contains("ultra") || s.contains("max") { return "ultra" }
+        if s.contains("max") || s.contains("ultra") { return "max" }
+        if s.contains("xhigh") || s.contains("x-high") { return "xhigh" }   // before "high" — xhigh contains it
         if s.contains("high") { return "high" }
         if s.contains("med")  { return "medium" }
         if s.contains("low")  { return "low" }
         return ""
+    }
+    private func effortLabel(_ l: String) -> String {
+        switch l { case "xhigh": return "X-High"; case "max": return "Max"; default: return l.capitalized }
     }
 }
 

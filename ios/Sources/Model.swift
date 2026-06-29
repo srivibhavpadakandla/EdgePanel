@@ -155,7 +155,7 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
-    struct ChatJob: Codable { var status: String; var result: String?; var sessionId: String?; var error: String? }
+    struct ChatJob: Codable { var status: String; var result: String?; var sessionId: String?; var error: String?; var delivered: Bool? }
 
     /// Answer a held AskUserQuestion. answers = {questionText: "label" or "a,b"}.
     func answerQuestion(id: String, answers: [String: String]) {

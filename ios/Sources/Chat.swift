@@ -34,6 +34,7 @@ final class ChatStore: ObservableObject {
     @Published var busy: Set<String> = []        // thread ids awaiting a reply
     @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop / reattach)
     @Published var reconnecting: Set<String> = []    // threads whose Mac link dropped (UI hint)
+    @Published var delivered: Set<String> = []       // editor threads whose message landed in the chat
     private var stopping: Set<String> = []           // threads the user asked to stop (streamJob bails next tick)
     private var activeStreams: [String: UUID] = [:]  // thread id → live poll loop's ownership token (no double-pollers)
 
@@ -98,7 +99,7 @@ final class ChatStore: ObservableObject {
         threads[i].updatedAt = Date()
         let cwd = threads[i].cwd, resume = threads[i].resumeId   // capture before the sort changes indices
         threads.sort { $0.updatedAt > $1.updatedAt }             // float this thread to the top now, not only on completion
-        busy.insert(threadId); save()
+        busy.insert(threadId); delivered.remove(threadId); save()
 
         Task {
             guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
@@ -134,7 +135,7 @@ final class ChatStore: ObservableObject {
         // an entry in `stopping` that nothing ever removes.
         if activeStreams[id] != nil || busy.contains(id) { stopping.insert(id) }
         activeStreams[id] = nil   // free the stream slot NOW so a quick Retry isn't dropped by the activeStreams guard
-        busy.remove(id); busyJob[id] = nil
+        busy.remove(id); busyJob[id] = nil; delivered.remove(id)
         if let i = threads.firstIndex(where: { $0.id == id }),
            threads[i].messages.last?.role != .assistant {
             // Nothing streamed yet → leave a clear marker instead of a silent stop.
@@ -205,6 +206,7 @@ final class ChatStore: ObservableObject {
             if activeStreams[threadId] != streamToken { return }
             if netFails > 0 { netFails = 0; setReconnecting(threadId, false) }
             if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
+            if job.delivered == true, !delivered.contains(threadId) { delivered.insert(threadId) }
             switch job.status {
             case "running":
                 if let partial = job.result, !partial.isEmpty { streamId = upsertStream(threadId, streamId, partial) }
@@ -234,7 +236,7 @@ final class ChatStore: ObservableObject {
     /// still own it). Needed because a Stop during send()'s pre-stream await clears busy, then
     /// send() re-sets busyJob, so the bailing stream must clear it again.
     private func settleStopped(_ threadId: String, _ streamToken: UUID) {
-        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId)
+        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId); delivered.remove(threadId)
         if activeStreams[threadId] == streamToken { activeStreams[threadId] = nil }
         save()
     }
@@ -257,7 +259,7 @@ final class ChatStore: ObservableObject {
         guard localLastUser == nil || localLastUser == histLastUser else { return false }
         threads[i].messages = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
         threads[i].updatedAt = Date(); threads.sort { $0.updatedAt > $1.updatedAt }
-        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId); save()
+        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId); delivered.remove(threadId); save()
         return true
     }
 
@@ -300,7 +302,7 @@ final class ChatStore: ObservableObject {
             threads[i].updatedAt = Date()
             threads.sort { $0.updatedAt > $1.updatedAt }
         }
-        busy.remove(id); busyJob[id] = nil; reconnecting.remove(id); save()
+        busy.remove(id); busyJob[id] = nil; reconnecting.remove(id); delivered.remove(id); save()
     }
 
     private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
@@ -784,6 +786,13 @@ struct ChatThreadView: View {
     private var thinking: Bool { busy && messages.last?.role == .user }   // sent, nothing back yet
     /// This thread IS the live editor session — sends type straight into Claude Code on the Mac.
     private var isEditor: Bool { sessionId == client.snapshot?.editorSessionId }
+    /// Editor delivery state for the waiting row: "Sending…" until the Mac verifies the message
+    /// landed in the chat input, then "✓ Sent to your editor".
+    private var editorWaitLabel: String? {
+        guard isEditor else { return nil }
+        return store.delivered.contains(sessionId) ? "Sent to your editor · waiting for Claude…"
+                                                   : "Sending to your editor…"
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -808,7 +817,7 @@ struct ChatThreadView: View {
                                 MessageView(message: m, streaming: busy && m.id == messages.last?.id && m.role == .assistant)
                                     .id(m.id)
                             }
-                            if thinking { ThinkingRow(label: isEditor ? "Typed into your editor · waiting for Claude…" : nil).id("thinking") }
+                            if thinking { ThinkingRow(label: editorWaitLabel, check: isEditor && store.delivered.contains(sessionId)).id("thinking") }
                             Color.clear.frame(height: 1).id("bottom")
                                 .onAppear { atBottom = true }.onDisappear { atBottom = false }
                         }
@@ -939,6 +948,7 @@ private struct MessageView: View {
 
 private struct ThinkingRow: View {
     var label: String? = nil
+    var check: Bool = false   // editor message confirmed delivered → green checkmark instead of dots
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
@@ -946,7 +956,16 @@ private struct ThinkingRow: View {
                 Text("Claude").font(.claude(11, .semibold)).tracking(0.4).foregroundColor(T.subtext)
             }
             if let label {
-                HStack(spacing: 7) { ThinkingDots(); Text(label).font(.claude(12, .medium)).foregroundColor(T.subtext) }
+                HStack(spacing: 7) {
+                    if check {
+                        Image(systemName: "checkmark.circle.fill").font(.system(size: 13)).foregroundColor(T.green)
+                            .transition(.scale.combined(with: .opacity))
+                    } else {
+                        ThinkingDots()
+                    }
+                    Text(label).font(.claude(12, .medium)).foregroundColor(check ? T.green : T.subtext)
+                }
+                .animation(.smooth(duration: 0.3), value: check)
             } else {
                 ThinkingDots()
             }

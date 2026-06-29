@@ -14,6 +14,7 @@ final class ChatRunner: @unchecked Sendable {
         var result: String?       // assistant reply (done)
         var sessionId: String?    // session to --resume next turn
         var error: String?
+        var delivered: Bool = false   // (live inject) the message was verified in the editor's chat
     }
 
     /// Result of kicking off a turn: a job to poll, the session is already busy, or
@@ -191,6 +192,9 @@ final class ChatRunner: @unchecked Sendable {
                     error: "couldn't type into your editor — make sure the Claude Code chat is open in VS Code/Cursor"))
                 return
             }
+            // Verified in the editor's chat → flag delivered so the phone shows a "✓ Sent to
+            // your editor" receipt while it waits for Claude's reply.
+            self.lock.lock(); self.jobs[jid]?.delivered = true; self.lock.unlock()
             // Watch the transcript: stream the growing reply into job.result, finish when the
             // turn completes (terminal assistant after the prompt) or the reply goes stable.
             let deadline = Date().addingTimeInterval(maxRuntime)
