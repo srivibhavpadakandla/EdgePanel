@@ -46,8 +46,8 @@ struct UsageWidget: Widget {
 struct UsageWidgetView: View {
     @Environment(\.widgetFamily) var family
     let entry: UsageEntry
-    private var frac: Double { min(max(entry.five / 100, 0), 1) }
-    private var pct: Int { Int(entry.five.rounded()) }
+    private var frac: Double { entry.five.isFinite ? min(max(entry.five / 100, 0), 1) : 0 }
+    private var pct: Int { entry.five.isFinite ? Int(entry.five.rounded()) : 0 }   // never Int(inf/nan) → trap
 
     var body: some View {
         switch family {

@@ -9,8 +9,12 @@ enum UsageShared {
 
     /// Called by the app on each poll. Only reloads the widget when the displayed % actually
     /// changes (WidgetKit rate-limits reloads, and the % only moves a point at a time).
-    static func write(fiveHourPct: Double, weekPct: Double, fiveHourResetEpoch: Double?) {
+    static func write(fiveHourPct rawFive: Double, weekPct rawWeek: Double, fiveHourResetEpoch: Double?) {
         guard let d = store else { return }
+        // Sanitize: a non-finite/out-of-range % (corrupted source) would trap Int(Double.inf) in
+        // the widget. Clamp to a sane range so the widget can never crash on it.
+        let fiveHourPct = rawFive.isFinite ? min(max(rawFive, 0), 999) : 0
+        let weekPct = rawWeek.isFinite ? min(max(rawWeek, 0), 999) : 0
         let prev = d.object(forKey: "fiveHourPct") as? Double
         d.set(fiveHourPct, forKey: "fiveHourPct")
         d.set(weekPct, forKey: "weekPct")

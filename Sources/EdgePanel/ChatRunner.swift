@@ -96,9 +96,26 @@ final class ChatRunner: @unchecked Sendable {
             }
             let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; closeOutOnce() }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
-            // Drain stderr concurrently (surfaces a real failure reason on the phone).
+            // Drain stderr concurrently (surfaces a real failure reason on the phone). Read via a
+            // dup'd POSIX fd so we can CLOSE it to unblock a stuck reader (an orphaned tool child
+            // can hold the stderr write-end) — closing returns -1/EBADF, vs the uncatchable Obj-C
+            // exception that closing a FileHandle under a blocked readDataToEndOfFile() raises.
+            let errFD = dup(err.fileHandleForReading.fileDescriptor)
+            let errCloseLock = NSLock(); var errClosed = false
+            func closeErrOnce() {
+                errCloseLock.lock(); let already = errClosed; errClosed = true; errCloseLock.unlock()
+                if !already, errFD >= 0 { close(errFD) }
+            }
             var errData = Data(); let errSem = DispatchSemaphore(value: 0)
-            DispatchQueue.global(qos: .utility).async { errData = err.fileHandleForReading.readDataToEndOfFile(); errSem.signal() }
+            DispatchQueue.global(qos: .utility).async {
+                var ebuf = [UInt8](repeating: 0, count: 16384)
+                while true {
+                    let n = ebuf.withUnsafeMutableBytes { read(errFD, $0.baseAddress, 16384) }
+                    if n <= 0 { break }
+                    errData.append(contentsOf: ebuf[0..<n])
+                }
+                errSem.signal()
+            }
 
             var accumulated = "", capturedSession: String?, finalResult: String?
             var isError = false, sawResult = false
@@ -145,14 +162,14 @@ final class ChatRunner: @unchecked Sendable {
             p.waitUntilExit()
             watchdog.cancel()
             closeOutOnce()   // reclaim our dup'd stdout fd in the normal path (watchdog may not have fired)
-            // Read errData once the reader has finished. Do NOT close the read handle to
-            // unblock a still-running reader — closing a FileHandle while another thread is
-            // inside readDataToEndOfFile() raises an UNCATCHABLE Obj-C exception (this is exactly
-            // why the stdout path was moved to POSIX read()). The process has already exited here,
-            // so stderr EOFs on its own almost immediately; in the rare orphaned-tool-child case
-            // we just proceed without the full stderr and the reader returns when that child exits.
+            // Read errData once the reader has finished. If it's still blocked (orphaned tool child
+            // holds the stderr write-end), CLOSE the dup'd fd to unblock it (POSIX read → -1/EBADF,
+            // safe — no Obj-C exception, no leaked thread/fd). Only read errData when the reader
+            // actually finished (gotErr); otherwise use "" to avoid racing the still-writing buffer.
             let gotErr = errSem.wait(timeout: .now() + 2) == .success
+            if !gotErr { closeErrOnce() }
             let stderr = gotErr ? (String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") : ""
+            closeErrOnce()   // reclaim the dup'd stderr fd in the normal path too
 
             let streamed = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalText = !streamed.isEmpty ? accumulated : (finalResult ?? "")
@@ -184,10 +201,6 @@ final class ChatRunner: @unchecked Sendable {
         lock.unlock()
 
         DispatchQueue.global(qos: .userInitiated).async { [maxRuntime] in
-            // Baseline assistant-message count BEFORE injecting, so we can tell the new reply
-            // apart from existing history in the transcript.
-            let baseAssistants = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
-                .filter { $0.role == "assistant" }.count
             guard EditorInjector.shared.inject(text: message, sessionId: sessionId, cwd: cwd) else {
                 self.finish(jid, Job(status: "error",
                     error: "couldn't type into your editor — make sure the Claude Code chat is open in VS Code/Cursor"))
@@ -202,9 +215,14 @@ final class ChatRunner: @unchecked Sendable {
             var lastText = "", sawReply = false, stable = 0
             while Date() < deadline {
                 usleep(1_200_000)
-                let assistants = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
-                    .filter { $0.role == "assistant" }
-                guard assistants.count > baseAssistants, let reply = assistants.last?.text, !reply.isEmpty else { continue }
+                // Take the reply that comes AFTER our injected prompt (the last user message),
+                // not the latest assistant overall — otherwise, if our message QUEUED behind an
+                // in-progress editor turn, we'd stream that turn's reply (which answers the
+                // PREVIOUS prompt) instead of ours.
+                let msgs = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
+                guard let lastUser = msgs.lastIndex(where: { $0.role == "user" }) else { continue }
+                let afterOurs = msgs[(lastUser + 1)...].filter { $0.role == "assistant" }
+                guard let reply = afterOurs.last?.text, !reply.isEmpty else { continue }
                 sawReply = true
                 if reply != lastText { lastText = reply; stable = 0; self.update(jid, partial: reply, sessionId: sessionId) }
                 else { stable += 1 }
@@ -252,10 +270,12 @@ final class ChatRunner: @unchecked Sendable {
         lock.lock(); jobs[jid] = job; procs[jid] = nil
         cancelIntent.remove(jid)   // drop any queued cancel intent (launch-fail / cancelled-before-track / normal exit)
         if let sid = jobSession.removeValue(forKey: jid) { resuming.remove(sid) }   // release the in-flight lock
-        // Evict old jobs so the map doesn't grow unbounded over a long session.
+        // Evict old jobs so the map doesn't grow unbounded over a long session — but NEVER evict
+        // a still-running turn (a long-runner with a low counter would otherwise become "gone" and
+        // trigger premature transcript recovery on the phone).
         if jobs.count > 24 {
             let keep = Set((max(1, counter - 23)...counter).map { "c\($0)" })
-            jobs = jobs.filter { keep.contains($0.key) }
+            jobs = jobs.filter { keep.contains($0.key) || $0.value.status == "running" }
         }
         lock.unlock()
     }

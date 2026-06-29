@@ -99,7 +99,9 @@ final class ChatStore: ObservableObject {
         threads[i].updatedAt = Date()
         let cwd = threads[i].cwd, resume = threads[i].resumeId   // capture before the sort changes indices
         threads.sort { $0.updatedAt > $1.updatedAt }             // float this thread to the top now, not only on completion
-        busy.insert(threadId); delivered.remove(threadId); save()
+        busy.insert(threadId); delivered.remove(threadId)
+        stopping.remove(threadId)   // a fresh turn must not inherit a pending Stop from a prior one
+        save()
 
         Task {
             guard let jobId = await EdgeClient.shared.sendChat(cwd: cwd, sessionId: resume, message: text) else {
@@ -335,7 +337,7 @@ final class ChatStore: ObservableObject {
         pendingSave = Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: 600_000_000)
             if Task.isCancelled { return }
-            try? JSONEncoder().encode(snapshot).write(to: u)
+            try? JSONEncoder().encode(snapshot).write(to: u, options: .atomic)   // no torn write if two saves race
         }
     }
     private func load() {

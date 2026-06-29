@@ -22,34 +22,37 @@ struct EdgeSnapshot: Codable {
     var editorCwd: String?
     var editorProject: String?
 
+    // Every non-optional field below is DEFAULTED — Swift's synthesized decoder throws on a
+    // missing key even inside a present (optional-typed) object/array, which would propagate up
+    // and blank the WHOLE dashboard. Defaults make a partial/older/error snapshot degrade per-field.
     struct PromptItem: Codable, Identifiable {
-        var id: String
-        var text: String
-        var atEpoch: Double
-        var project: String
+        var id = UUID().uuidString
+        var text = ""
+        var atEpoch: Double = 0
+        var project = ""
         var at: Date { Date(timeIntervalSince1970: atEpoch) }
     }
 
     struct PlanInfo: Codable {
-        var fiveHourPct: Double
-        var weekPct: Double
+        var fiveHourPct: Double = 0
+        var weekPct: Double = 0
         var fiveHourResetEpoch: Double?
         var weekResetEpoch: Double?
         var burnPerHour: Double?
         var limitClockEpoch: Double?
     }
     struct Spend: Codable {
-        var fiveHourUSD: Double
+        var fiveHourUSD: Double = 0
     }
     struct Working: Codable, Identifiable {
-        var id: String
-        var project: String
+        var id = UUID().uuidString
+        var project = ""
         var cwd: String = ""
         var model: String?
         var prompt: String?
         var promptSummary: String?
         var promptAtEpoch: Double?
-        var turnTokens: Int
+        var turnTokens: Int = 0
         var runningAgents: Int = 0   // in-flight Task subagents this turn
         var queuedPrompts: Int = 0   // prompts typed while this turn runs, waiting their turn
         var queuedTexts: [String] = []   // the actual queued prompt texts, in order
@@ -61,38 +64,38 @@ struct EdgeSnapshot: Codable {
         var display: String { (promptSummary?.isEmpty == false ? promptSummary : prompt) ?? "working…" }
     }
     struct Chat: Codable, Identifiable {
-        var id: String
-        var name: String
-        var project: String
+        var id = UUID().uuidString
+        var name = ""
+        var project = ""
         var cwd: String?
-        var lastActiveEpoch: Double
+        var lastActiveEpoch: Double = 0
         var lastActive: Date { Date(timeIntervalSince1970: lastActiveEpoch) }
     }
     struct CalDay: Codable, Identifiable {
-        var day: Int; var tokens: Int
+        var day = 0; var tokens = 0
         var id: Int { day }
     }
     struct Pending: Codable, Identifiable {
-        var id: String
-        var tool: String
-        var summary: String
-        var reason: String
-        var risk: String          // "read" | "write" | "danger"
+        var id = UUID().uuidString
+        var tool = ""
+        var summary = ""
+        var reason = ""
+        var risk = "read"          // "read" | "write" | "danger"
         var project: String?
-        var preview: [String]
-        var allowRule: String
+        var preview: [String] = []
+        var allowRule = ""
     }
     struct Question: Codable, Identifiable {
-        var id: String
+        var id = UUID().uuidString
         var project: String?
-        var items: [Item]
+        var items: [Item] = []
         struct Item: Codable, Identifiable {
-            var question: String
-            var header: String
-            var multiSelect: Bool
-            var options: [Opt]
+            var question = ""
+            var header = ""
+            var multiSelect = false
+            var options: [Opt] = []
             var id: String { question }
-            struct Opt: Codable { var label: String; var description: String? }
+            struct Opt: Codable { var label = ""; var description: String? }
         }
     }
 }

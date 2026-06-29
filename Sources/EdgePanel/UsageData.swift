@@ -1011,6 +1011,9 @@ extension UsageLoader {
     /// Resolve a session id → its transcript file. Fast path: Claude Code encodes the cwd
     /// (every non-alphanumeric → '-') as the project dir; else enumerate.
     static func sessionFileURL(sessionId: String, cwd: String = "") -> URL? {
+        // Reject anything that isn't UUID-shaped before it touches a file path (a crafted
+        // sessionId like "../../x" would otherwise traverse out of the projects dir).
+        guard !sessionId.isEmpty, sessionId.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return nil }
         let base = projectsBase()
         if !cwd.isEmpty {
             let encoded = String(cwd.map { ($0.isLetter || $0.isNumber) ? $0 : "-" })

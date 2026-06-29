@@ -371,21 +371,27 @@ final class UsageStore: ObservableObject {
     /// ALWAYS-ON Mac (so they reach the phone even when the app is closed), instead of the
     /// app's poll loop (which only runs while the app is open). Re-arms on a window reset.
     var onUsageAlert: ((String, String) -> Void)?
-    private var usageAlerted: Set<Int> = []
+    // PERSISTED across launches so a Mac restart at ≥80% doesn't re-fire the push (the threshold
+    // was already alerted this window); re-arms only when the window actually resets.
+    private var usageAlerted: Set<Int> = Set(UserDefaults.standard.array(forKey: "edgepanel.usageAlerted") as? [Int] ?? [])
     private var usageLastPct = 0.0
     private var usageForecastAlerted = false
-    private var lastUsageReset: Date?
+    private var lastUsageReset: Date? = UserDefaults.standard.object(forKey: "edgepanel.usageReset") as? Date
     private func checkUsageAlert(_ p: PlanUsage) {
         let pct = p.fiveHourPct
+        guard pct.isFinite else { return }   // non-finite (corrupted plan.json) → would trap Int(inf)
         // Re-arm when the 5-hour window resets (new reset time) OR on a clear pct drop — so the
         // 80/90 alerts fire again next window even if usage was still low at the reset moment.
         if p.fiveHourReset != lastUsageReset || pct < usageLastPct - 5 {
             usageAlerted.removeAll(); usageForecastAlerted = false
+            UserDefaults.standard.set([Int](), forKey: "edgepanel.usageAlerted")
         }
         lastUsageReset = p.fiveHourReset
         usageLastPct = pct
+        UserDefaults.standard.set(p.fiveHourReset, forKey: "edgepanel.usageReset")
         for thr in [80, 90] where pct >= Double(thr) && !usageAlerted.contains(thr) {
             usageAlerted.insert(thr)
+            UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted")
             onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
                           "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
         }
