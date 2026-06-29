@@ -65,24 +65,22 @@ final class EditorInjector: @unchecked Sendable {
         guard saved != nil else { return false }
         usleep(650_000)                                  // let the editor come forward
 
+        // Paste the text EXACTLY ONCE (focus the chat input + Cmd+V). Re-pasting on each retry
+        // appended it into the same input — "Hello" became "HelloHelloHello". After this the
+        // draft holds the text; retries below only re-SUBMIT (press Return), never re-paste.
+        focusAndPaste()
+
         var landed = false
-        for attempt in 0..<3 {
-            // A slow transcript flush from a PRIOR attempt may have already delivered the
-            // message — re-check before pasting again so we never double-submit.
-            if attempt > 0 {
-                if UsageLoader.typedPromptLanded(sessionId: sessionId, cwd: cwd, needle: needle) { landed = true; break }
-                _ = onMain { self.runningEditor()?.activate(options: [.activateIgnoringOtherApps]); return 0 }
-                usleep(400_000)
-            }
-            pasteAndSubmit()
-            // Verify: watch the transcript for the typed prompt to appear (submitted = a user
-            // record, queued mid-turn = a queued_command attachment — both count).
-            let deadline = Date().addingTimeInterval(4)
+        for _ in 0..<6 {
+            // Verify: the typed prompt appears in the transcript (submitted = a user record,
+            // queued mid-turn = a queued_command attachment — both count).
+            let deadline = Date().addingTimeInterval(1.6)
             while Date() < deadline {
-                usleep(400_000)
+                usleep(350_000)
                 if UsageLoader.typedPromptLanded(sessionId: sessionId, cwd: cwd, needle: needle) { landed = true; break }
             }
             if landed { break }
+            submitReturn()   // re-submit the SAME draft (no re-paste → no accumulation)
         }
 
         // Restore the user's clipboard once we're done — but only if our text is still there
@@ -95,23 +93,30 @@ final class EditorInjector: @unchecked Sendable {
         return landed
     }
 
-    /// One focus → paste → submit pass. PRIMARY: System Events (Accessibility) — Electron/
-    /// Chromium honors these synthetic events far more reliably than raw CGEvents (cliclick).
-    private func pasteAndSubmit() {
-        let typed = runOsascript("""
+    /// Focus the Claude Code chat input (Cmd+Esc) and paste — ONCE. PRIMARY: System Events
+    /// (Accessibility), which Electron/Chromium honors far more reliably than raw CGEvents.
+    private func focusAndPaste() {
+        let ok = runOsascript("""
         tell application "System Events"
           key code 53 using command down
           delay 0.45
           keystroke "v" using command down
-          delay 0.6
+          delay 0.35
           key code 36
         end tell
         """, timeout: 6)
-        if !typed, let cli = Self.cliclick {             // fallback: cliclick CGEvents
+        if !ok, let cli = Self.cliclick {
             run(cli, ["kd:cmd", "kp:esc", "ku:cmd"]); usleep(500_000)
-            run(cli, ["kd:cmd", "t:v", "ku:cmd"]); usleep(900_000)
+            run(cli, ["kd:cmd", "t:v", "ku:cmd"]); usleep(700_000)
             run(cli, ["kp:return"])
         }
+    }
+
+    /// Press Return to submit/queue whatever is already in the focused input — used to RETRY
+    /// the submit without pasting again (the first focusAndPaste already put the text there).
+    private func submitReturn() {
+        let ok = runOsascript("tell application \"System Events\" to key code 36", timeout: 4)
+        if !ok, let cli = Self.cliclick { run(cli, ["kp:return"]) }
     }
 
     /// Interrupt the running turn in the live editor session (Escape stops generation).

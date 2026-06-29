@@ -388,11 +388,25 @@ struct ChatListView: View {
             seen.insert(w.id); return true   // dedupe: a duplicate id would break the ForEach
         }
     }
-    private var otherThreads: [ChatThread] {
-        let workingIds = Set(workingRemote.map { $0.id })
+    private var excludedIds: Set<String> {
+        var s = Set(workingRemote.map { $0.id }); if let e = editorId { s.insert(e) }; return s
+    }
+    /// The full history of your chats — every recent Claude Code session on the Mac, newest
+    /// first, so you can jump into any of them. (Excludes the editor hero + what's running.)
+    private var historyChats: [EdgeSnapshot.Chat] {
+        let excl = excludedIds
+        var seen = Set<String>()
+        return (client.snapshot?.chats ?? []).filter { c in
+            guard !excl.contains(c.id), seen.insert(c.id).inserted else { return false }; return true
+        }
+    }
+    /// Phone-side chats (new tasks you started here) that aren't in the Mac's recent list yet.
+    private var extraThreads: [ChatThread] {
+        let inHistory = Set((client.snapshot?.chats ?? []).map { $0.id })
+        let excl = excludedIds
         return store.threads.filter {
-            $0.id != editorId && $0.sessionId != editorId
-                && !workingIds.contains($0.id) && !workingIds.contains($0.sessionId ?? "")
+            !inHistory.contains($0.id) && !inHistory.contains($0.sessionId ?? "")
+                && !excl.contains($0.id) && !excl.contains($0.sessionId ?? "")
         }
     }
 
@@ -430,12 +444,13 @@ struct ChatListView: View {
                             }
                         }
 
-                        if !otherThreads.isEmpty {
+                        if !historyChats.isEmpty || !extraThreads.isEmpty {
                             HStack {
-                                Text("YOUR CHATS").font(.claude(10, .semibold)).tracking(0.8).foregroundColor(T.subtext)
+                                Text("HISTORY").font(.claude(10, .semibold)).tracking(0.8).foregroundColor(T.subtext)
                                 Spacer()
-                            }.padding(.top, 4)
-                            ForEach(otherThreads) { t in
+                                Text("\(historyChats.count + extraThreads.count)").font(.claude(10, .semibold)).foregroundColor(T.subtext)
+                            }.padding(.top, 6)
+                            ForEach(extraThreads) { t in
                                 NavigationLink {
                                     ChatThreadView(sessionId: t.id, project: t.project, cwd: t.cwd)
                                 } label: { ThreadRow(t: t, busy: store.busy.contains(t.id)) }
@@ -445,9 +460,14 @@ struct ChatListView: View {
                                         Button(role: .destructive) { store.delete(t.id) } label: { Label("Delete", systemImage: "trash") }
                                     }
                             }
+                            ForEach(historyChats) { c in
+                                NavigationLink {
+                                    ChatThreadView(sessionId: c.id, project: c.project, cwd: c.cwd ?? "")
+                                } label: { HistoryRow(chat: c) }.buttonStyle(.plain)
+                            }
                         }
 
-                        if editorId == nil && otherThreads.isEmpty {
+                        if editorId == nil && historyChats.isEmpty && extraThreads.isEmpty {
                             VStack(spacing: 12) {
                                 Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 34)).foregroundColor(T.accent2)
                                 Text("Drive Claude Code from here").font(.claude(15, .semibold)).foregroundColor(T.text)
@@ -673,6 +693,26 @@ private struct EditorHeroCard: View {
             }
         )
         .shadow(color: T.accent.opacity(0.18), radius: 16, x: 0, y: 6)
+    }
+}
+
+/// One past chat in the history — its name, project, and when it was last active. Tap to
+/// open it (loads the real transcript) and pick up the conversation.
+private struct HistoryRow: View {
+    let chat: EdgeSnapshot.Chat
+    var body: some View {
+        Card {
+            HStack(spacing: 11) {
+                Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(T.accent2).frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(chat.name).font(.claude(15, .semibold)).foregroundColor(T.text).lineLimit(1)
+                    Text(chat.project).font(.claude(11)).foregroundColor(T.subtext).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text(chat.lastActive, style: .relative).font(.claude(10)).foregroundColor(T.subtext)
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundColor(T.subtext)
+            }
+        }
     }
 }
 
