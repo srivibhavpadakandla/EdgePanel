@@ -153,8 +153,13 @@ struct UsageTab: View {
     }
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "bird.fill").foregroundColor(birdTint)
-                .animation(.easeInOut(duration: 0.35), value: birdTint)
+            // The ClaudePix mascot (ported from the Mac panel) — its posture is the live
+            // mascotAnim from the snapshot, tinted by the current mode.
+            AnimatedMascot(name: client.snapshot?.mascotAnim ?? "idle_blink",
+                           cell: 1.7, fill: birdTint, eye: T.bg, crop: true)
+                .frame(width: 30, height: 30)
+                .animation(.easeInOut(duration: 0.4), value: birdTint)
+                .animation(.easeInOut(duration: 0.4), value: client.snapshot?.mascotAnim)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Usage").font(.claude(24, .semibold)).foregroundColor(T.text)
                 // When the Mac is unreachable, keep showing the most recent data and say how old it is.
@@ -555,6 +560,7 @@ struct WorkingCard: View {
                         Text("\(working.count) running").font(.claude(11, .medium)).foregroundColor(T.green)
                             .padding(.horizontal, 9).padding(.vertical, 3)
                             .background(Capsule().fill(T.green.opacity(0.16)))
+                            .contentTransition(.numericText())
                     }
                 }
                 if working.isEmpty {
@@ -570,10 +576,13 @@ struct WorkingCard: View {
                                 .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(T.green.opacity(0.06)))
                                 .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(T.green.opacity(0.16), lineWidth: 1))
                         }.buttonStyle(.plain)
+                        .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
+                                                removal: .opacity))
                     }
                 }
             }
         }
+        .animation(.smooth(duration: 0.38), value: working.count)
     }
 }
 

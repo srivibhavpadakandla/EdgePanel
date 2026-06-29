@@ -427,6 +427,7 @@ struct ChatListView: View {
                                                cwd: client.snapshot?.editorCwd ?? "",
                                                mode: client.snapshot?.mode ?? "ask",
                                                busy: editorBusy,
+                                               mascotAnim: client.snapshot?.mascotAnim ?? "idle_blink",
                                                lastPrompt: client.snapshot?.promptHistory?.first?.text)
                             }.buttonStyle(.plain)
                         }
@@ -642,6 +643,7 @@ private struct EditorHeroCard: View {
     let cwd: String
     let mode: String
     let busy: Bool
+    var mascotAnim: String = "idle_blink"
     let lastPrompt: String?
 
     private var modeLabel: String {
@@ -662,8 +664,10 @@ private struct EditorHeroCard: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(modeColor.opacity(0.16)))
             }
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 15, weight: .bold)).foregroundColor(T.accent)
+            HStack(spacing: 10) {
+                AnimatedMascot(name: mascotAnim, cell: 1.7, fill: modeColor, eye: T.bg, crop: true)
+                    .frame(width: 30, height: 30)
+                    .animation(.easeInOut(duration: 0.4), value: mascotAnim)
                 Text(project).font(.claude(20, .bold)).foregroundColor(T.text).lineLimit(1)
                 Spacer(minLength: 0)
             }
