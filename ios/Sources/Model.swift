@@ -3,12 +3,14 @@ import SwiftUI
 
 // Mirrors EdgeSnapshot served by the Mac (epoch-second dates).
 struct EdgeSnapshot: Codable {
-    var generatedAt: Double
+    // All non-optional fields are DEFAULTED so one missing key can't fail the whole decode and
+    // blank the dashboard — a partial/older/error-state snapshot still degrades gracefully.
+    var generatedAt: Double = 0
     var plan: PlanInfo?
-    var spend: Spend
-    var working: [Working]
-    var chats: [Chat]
-    var calendar: [CalDay]
+    var spend = Spend(fiveHourUSD: 0)
+    var working: [Working] = []
+    var chats: [Chat] = []
+    var calendar: [CalDay] = []
     var pending: Pending?
     var question: Question?
     var autoApprove: Bool?           // Autonomous mode on (every permission auto-allowed)

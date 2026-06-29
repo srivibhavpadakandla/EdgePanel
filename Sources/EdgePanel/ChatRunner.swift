@@ -145,12 +145,13 @@ final class ChatRunner: @unchecked Sendable {
             p.waitUntilExit()
             watchdog.cancel()
             closeOutOnce()   // reclaim our dup'd stdout fd in the normal path (watchdog may not have fired)
-            // Only read errData once the reader has finished (avoid racing it). If it's
-            // still blocked in readDataToEndOfFile because an orphaned tool child inherited
-            // the stderr write-end, CLOSE the read handle so the reader thread unblocks and
-            // the pipe/thread are reclaimed instead of leaking for the rest of the session.
+            // Read errData once the reader has finished. Do NOT close the read handle to
+            // unblock a still-running reader — closing a FileHandle while another thread is
+            // inside readDataToEndOfFile() raises an UNCATCHABLE Obj-C exception (this is exactly
+            // why the stdout path was moved to POSIX read()). The process has already exited here,
+            // so stderr EOFs on its own almost immediately; in the rare orphaned-tool-child case
+            // we just proceed without the full stderr and the reader returns when that child exits.
             let gotErr = errSem.wait(timeout: .now() + 2) == .success
-            if !gotErr { try? err.fileHandleForReading.close() }
             let stderr = gotErr ? (String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") : ""
 
             let streamed = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)

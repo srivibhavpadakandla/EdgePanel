@@ -1035,10 +1035,14 @@ extension UsageLoader {
         guard !key.isEmpty, let url = sessionFileURL(sessionId: sessionId, cwd: cwd),
               let text = tailString(url, maxBytes: 524_288) else { return false }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        for sub in lines.suffix(80).reversed() {
+        // Check ONLY the most-recent typed prompt — if the inject landed, our text is the LAST
+        // user/queued record. Matching ANY of the last 80 would false-positive on an identical
+        // prompt typed earlier (the verify loop re-sends the same text), declaring success against
+        // a stale occurrence.
+        for sub in lines.suffix(120).reversed() {
             guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any],
                   let t = userPromptText(o) else { continue }
-            if t.contains(key) { return true }
+            return t.contains(key)   // the latest typed prompt — true iff IT is our message
         }
         return false
     }

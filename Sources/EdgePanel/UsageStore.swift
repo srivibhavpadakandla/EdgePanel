@@ -374,9 +374,15 @@ final class UsageStore: ObservableObject {
     private var usageAlerted: Set<Int> = []
     private var usageLastPct = 0.0
     private var usageForecastAlerted = false
+    private var lastUsageReset: Date?
     private func checkUsageAlert(_ p: PlanUsage) {
         let pct = p.fiveHourPct
-        if pct < usageLastPct - 5 { usageAlerted.removeAll(); usageForecastAlerted = false }  // window reset → re-arm
+        // Re-arm when the 5-hour window resets (new reset time) OR on a clear pct drop — so the
+        // 80/90 alerts fire again next window even if usage was still low at the reset moment.
+        if p.fiveHourReset != lastUsageReset || pct < usageLastPct - 5 {
+            usageAlerted.removeAll(); usageForecastAlerted = false
+        }
+        lastUsageReset = p.fiveHourReset
         usageLastPct = pct
         for thr in [80, 90] where pct >= Double(thr) && !usageAlerted.contains(thr) {
             usageAlerted.insert(thr)

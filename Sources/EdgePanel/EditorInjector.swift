@@ -56,14 +56,16 @@ final class EditorInjector: @unchecked Sendable {
         let pb = NSPasteboard.general
         // AppKit (find editor, set clipboard, activate) on main — snapshot the user's
         // clipboard so we can restore it after the paste (don't destroy their copied text).
-        let saved: String? = onMain {
+        // Snapshot the prior clipboard + the changeCount right after WE set it, so the restore
+        // can tell "still our text" from "user copied something new" without comparing strings.
+        let saved: (prior: String?, change: Int)? = onMain {
             guard let app = self.runningEditor() else { return nil }
             let prior = pb.string(forType: .string)
             pb.clearContents(); pb.setString(text, forType: .string)
             app.activate(options: [.activateIgnoringOtherApps])
-            return prior ?? ""        // "" sentinel = editor found (nil only when none)
+            return (prior, pb.changeCount)
         }
-        guard saved != nil else { return false }
+        guard let saved else { return false }
         // Activation is ASYNC — wait until the editor is really frontmost before any keystroke.
         // A fixed sleep raced slow app switches and dropped the paste/Return into the wrong app
         // (a big source of "glitchy"). Then focus the chat input, paste ONCE, submit.
@@ -88,11 +90,14 @@ final class EditorInjector: @unchecked Sendable {
             submitReturn()
         }
 
-        // Restore the user's clipboard once we're done — but only if our text is still there
-        // (don't clobber something they copied in the meantime).
-        if let prior = saved, !prior.isEmpty {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                self.onMain { if pb.string(forType: .string) == text { pb.clearContents(); pb.setString(prior, forType: .string) } }
+        // Restore the user's clipboard, ALWAYS clearing our injected text — but only if they
+        // haven't copied something new since (changeCount unchanged). Gating on changeCount
+        // (not string-equality) also restores correctly when the prior clipboard was empty.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            self.onMain {
+                guard pb.changeCount == saved.change else { return }   // user copied since → leave it
+                pb.clearContents()
+                if let p = saved.prior { pb.setString(p, forType: .string) }
             }
         }
         return landed

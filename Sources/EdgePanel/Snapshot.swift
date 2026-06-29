@@ -15,7 +15,7 @@ struct EdgeSnapshot: Codable {
     var question: Question?    // an AskUserQuestion waiting on you (answer from the phone)
     var autoApprove: Bool = false   // Autonomous mode is on (every permission auto-allowed)
     var mode: String = "ask"        // permission mode: ask | edit | plan | auto | bypass
-    var effort: String = ""         // reasoning effort: low | medium | high | ultra | "" (unknown)
+    var effort: String = ""         // reasoning effort: low | medium | high | xhigh | max | "" (unknown)
     var mascotAnim: String = "idle_blink"   // live mascot posture — phone can mirror it
     var promptHistory: [PromptItem] = []    // recent human-typed prompts, newest first
     // The live editor session you're working in at the Mac — the phone's "Editor" chat
