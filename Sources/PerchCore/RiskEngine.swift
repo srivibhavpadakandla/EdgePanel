@@ -228,7 +228,16 @@ public enum RiskEngine {
         // a plain .write that Autonomous mode silently auto-allows. Writing them = persistence,
         // credential theft, or self-modifying the permission allowlist → always require a tap.
         let home = NSHomeDirectory().lowercased()
-        func underHome(_ rel: String) -> Bool { lower.hasPrefix(home + rel) }
+        // Boundary-aware: match the exact file (~/.zshrc), or dir contents / extensions
+        // (~/.ssh/id_rsa, ~/.claude/settings.json) — but NOT a sibling like ~/.zshrc_backup
+        // or ~/.ssh_notes which a bare hasPrefix would wrongly flag.
+        func underHome(_ rel: String) -> Bool {
+            let full = home + rel
+            guard lower.hasPrefix(full) else { return false }
+            if lower.count == full.count { return true }
+            let next = lower[lower.index(lower.startIndex, offsetBy: full.count)]
+            return next == "/" || next == "."
+        }
         let sensitiveUser = underHome("/.ssh") || underHome("/library/launchagents") || underHome("/library/launchdaemons")
             || underHome("/.claude/settings") || underHome("/.zshrc") || underHome("/.zprofile") || underHome("/.zshenv")
             || underHome("/.bashrc") || underHome("/.bash_profile") || underHome("/.profile")

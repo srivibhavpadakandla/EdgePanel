@@ -37,6 +37,25 @@ final class ScannerVC: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        // Gate on camera authorization first — a DENIED/restricted camera otherwise yields a
+        // silent black screen (the device + input succeed, but startRunning produces no frames).
+        // Show the guidance/manual-entry fallback instead.
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureSession()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    granted ? self.configureSession() : self.showUnavailable()
+                }
+            }
+        default:
+            showUnavailable()   // denied / restricted
+        }
+    }
+
+    private func configureSession() {
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else {
@@ -53,6 +72,7 @@ final class ScannerVC: UIViewController {
         layer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(layer)
         preview = layer
+        view.setNeedsLayout()   // size the preview layer now that it exists (after async grant)
         sessionQueue.async { self.session.startRunning() }
     }
 

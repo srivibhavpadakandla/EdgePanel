@@ -210,7 +210,11 @@ final class EdgePanelState: ObservableObject {
             resolvers[bid] = continuation
             pendingRules[bid] = request.allowRule
             pendingById[bid] = request
-            pending = request
+            // Don't clobber a card the user is mid-decision on: a newly-arrived request is
+            // enqueued in pendingById and resolve() surfaces the next-oldest one when the
+            // displayed request resolves. Only take the slot if it's empty, so a click in
+            // flight always lands on the request the user is actually looking at.
+            if pending == nil { pending = request }
             onApprovalChange?(true)           // lock open + auto-reveal
             pushPermissionAlert(request)      // Tier 2: ping the phone (no-op unless APNs configured)
             idleTimer?.invalidate(); idleTimer = nil
@@ -326,7 +330,7 @@ final class EdgePanelState: ObservableObject {
         // Redact like the permission path — don't ship a secret in the question text through APNs/ntfy.
         let body = Self.redactSecrets(first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer")
         if APNsPusher.shared.enabled, let dt = devicePushToken {
-            APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body)
+            APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body, questionId: q.id)
         }
         NtfyPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
     }

@@ -66,10 +66,11 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
         // permission/question in-app. If it hasn't (e.g. the phone is off-LAN so /snapshot
         // never delivered the card), this push is the ONLY actionable surface — let it through.
         let info = notification.request.content.userInfo
-        if let pid = info["permId"] as? String, pid == ActivityManager.shared.surfacedPermId {
+        let am = ActivityManager.shared
+        if let pid = info["permId"] as? String, pid == am.surfacedPermId || am.wasRecentlySurfaced(perm: pid) {
             completionHandler([]); return
         }
-        if let qid = info["questionId"] as? String, qid == ActivityManager.shared.surfacedQuestionId {
+        if let qid = info["questionId"] as? String, qid == am.surfacedQuestionId || am.wasRecentlySurfaced(question: qid) {
             completionHandler([]); return
         }
         completionHandler([.banner, .sound])
@@ -152,7 +153,7 @@ struct Dashboard: View {
     var body: some View {
         VStack(spacing: 14) {
             if let s = client.snapshot {
-                if let q = s.question { QuestionCard(q: q) }
+                if let q = s.question { QuestionCard(q: q).id(q.id) }   // fresh @State per question (no stale selection leak)
                 if let pend = s.pending { PermissionCard(p: pend) }
                 if let p = s.plan { PlanCard(plan: p) }
                 WorkingCard(working: s.working)
@@ -548,7 +549,7 @@ struct CalendarCard: View {
     let days: [EdgeSnapshot.CalDay]
     @State private var selected: Int?
     var body: some View {
-        let map = Dictionary(uniqueKeysWithValues: days.map { ($0.day, $0.tokens) })
+        let map = Dictionary(days.map { ($0.day, $0.tokens) }, uniquingKeysWith: { a, _ in a })   // dup-day-safe
         let cal = Calendar.current
         let now = Date()
         let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: now)) ?? now

@@ -16,6 +16,8 @@ final class PromptSummarizer {
                                       (NSHomeDirectory() + "/.claude/local/claude")]
 
     private var cache: [String: String] = [:]
+    private var order: [String] = []          // LRU recency, oldest first
+    private static let maxEntries = 200
     private var inflight: Set<String> = []
     private let lock = NSLock()
     private let q = DispatchQueue(label: "edgepanel.summarize", qos: .utility, attributes: .concurrent)
@@ -25,7 +27,10 @@ final class PromptSummarizer {
     func shortLabel(for prompt: String, onReady: @escaping (String) -> Void) -> String? {
         let key = prompt   // exact key — no hash collisions, no per-process-randomized hashValue
         lock.lock()
-        if let s = cache[key] { lock.unlock(); return s }
+        if let s = cache[key] {
+            order.removeAll { $0 == key }; order.append(key)   // bump LRU recency
+            lock.unlock(); return s
+        }
         if inflight.contains(key) { lock.unlock(); return nil }
         inflight.insert(key)
         lock.unlock()
@@ -35,6 +40,10 @@ final class PromptSummarizer {
             guard let self else { return }
             self.lock.lock()
             self.cache[key] = summary
+            self.order.append(key)
+            while self.cache.count > Self.maxEntries, let oldest = self.order.first {   // bounded LRU
+                self.order.removeFirst(); self.cache[oldest] = nil
+            }
             self.inflight.remove(key)
             self.lock.unlock()
             DispatchQueue.main.async { onReady(summary) }

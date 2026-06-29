@@ -19,6 +19,20 @@ final class ActivityManager {
     private var lastQuestionId: String?    // question already surfaced
     var surfacedPermId: String? { lastPermId }       // for willPresent dedup
     var surfacedQuestionId: String? { lastQuestionId }
+    // Recently surfaced ids (id, when) — still de-dup a LATE duplicate APNs push that lands
+    // after the live slot was cleared on resolve. Trimmed to ~2 min.
+    private var recentPermIds: [(String, Date)] = []
+    private var recentQuestionIds: [(String, Date)] = []
+    private func remember(_ id: String, into arr: inout [(String, Date)]) {
+        arr.removeAll { Date().timeIntervalSince($0.1) > 120 }
+        if !arr.contains(where: { $0.0 == id }) { arr.append((id, Date())) }
+    }
+    func wasRecentlySurfaced(perm id: String) -> Bool {
+        recentPermIds.contains { $0.0 == id && Date().timeIntervalSince($0.1) <= 120 }
+    }
+    func wasRecentlySurfaced(question id: String) -> Bool {
+        recentQuestionIds.contains { $0.0 == id && Date().timeIntervalSince($0.1) <= 120 }
+    }
     private var pushTokenTask: Task<Void, Never>?
     private var endTask: Task<Void, Never>?   // deferred "done→end" (cancellable if a new turn arrives)
     private var emptyTicks = 0                 // consecutive syncs with no working sessions (done debounce)
@@ -64,7 +78,7 @@ final class ActivityManager {
     func syncPermission(_ pending: EdgeSnapshot.Pending?) {
         guard let p = pending else { lastPermId = nil; return }
         guard p.id != lastPermId else { return }
-        lastPermId = p.id
+        lastPermId = p.id; remember(p.id, into: &recentPermIds)
         let c = UNMutableNotificationContent()
         c.title = "\(p.tool) needs approval"
         c.body = p.summary.isEmpty ? p.reason : p.summary
@@ -79,7 +93,7 @@ final class ActivityManager {
     func syncQuestion(_ question: EdgeSnapshot.Question?) {
         guard let q = question else { lastQuestionId = nil; return }
         guard q.id != lastQuestionId else { return }
-        lastQuestionId = q.id
+        lastQuestionId = q.id; remember(q.id, into: &recentQuestionIds)
         let c = UNMutableNotificationContent()
         c.title = "Claude is asking you"
         c.body = q.items.first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to open and answer"

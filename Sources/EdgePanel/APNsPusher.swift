@@ -83,9 +83,10 @@ final class APNsPusher: @unchecked Sendable {
     }
 
     /// Push a plain alert notification to the device token (usage / done fallback).
-    func pushAlert(deviceToken: String, title: String, body: String) {
+    func pushAlert(deviceToken: String, title: String, body: String, questionId: String? = nil) {
         guard let config else { return }
-        let payload: [String: Any] = ["aps": ["alert": ["title": title, "body": body], "sound": "default"]]
+        var payload: [String: Any] = ["aps": ["alert": ["title": title, "body": body], "sound": "default"]]
+        if let qid = questionId { payload["questionId"] = qid }   // so the foreground app can dedup it
         send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
     }
 
