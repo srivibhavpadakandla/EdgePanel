@@ -464,6 +464,11 @@ struct ChatListView: View {
                                 NavigationLink {
                                     ChatThreadView(sessionId: c.id, project: c.project, cwd: c.cwd ?? "")
                                 } label: { HistoryRow(chat: c) }.buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button { client.openChat(c) } label: {
+                                            Label("Open on Mac (reliable for big chats)", systemImage: "macwindow")
+                                        }
+                                    }
                             }
                         }
 
