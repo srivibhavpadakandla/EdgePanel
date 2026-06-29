@@ -538,7 +538,13 @@ struct PermissionCard: View {
 }
 
 struct WorkingCard: View {
-    let working: [EdgeSnapshot.Working]
+    let workingRaw: [EdgeSnapshot.Working]
+    init(working: [EdgeSnapshot.Working]) { self.workingRaw = working }
+    // Dedupe by id — a duplicate session id (same uuid under two project dirs) would break ForEach.
+    private var working: [EdgeSnapshot.Working] {
+        var seen = Set<String>()
+        return workingRaw.filter { seen.insert($0.id).inserted }
+    }
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {

@@ -163,7 +163,7 @@ final class ActivityManager {
             // new turn within the hold window spawn a DUPLICATE activity.
             endTask = Task {
                 await act.update(ActivityContent(state: done, staleDate: nil))
-                try? await Task.sleep(nanoseconds: 4_000_000_000)   // hold "✓ Complete" visibly
+                try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly
                 if Task.isCancelled { return }                      // a new turn reclaimed this activity
                 await act.end(ActivityContent(state: done, staleDate: nil),
                               dismissalPolicy: .after(Date().addingTimeInterval(6)))

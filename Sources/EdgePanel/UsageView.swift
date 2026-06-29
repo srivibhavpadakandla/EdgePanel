@@ -396,6 +396,7 @@ struct PermissionCard: View {
 struct ModeCard: View {
     @ObservedObject var state: EdgePanelState
     let theme: Theme
+    var working: [LiveSession] = []   // working chats — show/group each one's mode + effort
 
     private struct Mode { let key, label, icon: String }
     private let modes: [Mode] = [
@@ -420,58 +421,141 @@ struct ModeCard: View {
         }
     }
 
+    // Distinct (mode, effort) settings among the working chats, largest group first.
+    private struct SettingGroup: Identifiable {
+        let mode: String, effort: String, sessions: [LiveSession]
+        var id: String { "\(mode)|\(effort)" }
+    }
+    private var groups: [SettingGroup] {
+        let buckets = Dictionary(grouping: working) { "\($0.modeKey)|\($0.effortKey)" }
+        return buckets.values
+            .map { SettingGroup(mode: $0[0].modeKey, effort: $0[0].effortKey, sessions: $0) }
+            .sorted { ($0.sessions.count, $0.mode) > ($1.sessions.count, $1.mode) }
+    }
+    private func modeLabel(_ k: String) -> String { modes.first { $0.key == k }?.label ?? "Ask" }
+    private func modeIcon(_ k: String) -> String { modes.first { $0.key == k }?.icon ?? "hand.raised" }
+    private func tint(forMode k: String) -> Color {
+        switch k {
+        case "bypass": return theme.red
+        case "edit":   return theme.amber
+        case "auto":   return theme.accent
+        default:       return theme.accent2   // plan / ask
+        }
+    }
+
     var body: some View {
-        let active = state.normalizedMode
-        let tint = state.modeTint(theme)
-        VStack(alignment: .leading, spacing: 11) {
+        // 0–1 distinct setting → the rich 5-mode tiles (idle shows your current/global setting).
+        // 2+ distinct settings across open chats → one category per (mode, effort), chats grouped.
+        let multi = groups.count >= 2
+        let soloMode = groups.first?.mode ?? state.normalizedMode
+        let soloEffort = groups.first?.effort ?? state.normalizedEffort
+        return VStack(alignment: .leading, spacing: 11) {
             HStack {
                 Text("MODE").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
                 Spacer()
-                Text(fullLabel(active)).font(.claude(10, .semibold)).foregroundColor(tint)
-            }
-            HStack(spacing: 6) {
-                ForEach(modes, id: \.key) { m in
-                    let on = m.key == active
-                    VStack(spacing: 4) {
-                        Image(systemName: m.icon).font(.system(size: 13, weight: .semibold))
-                        Text(m.label).font(.claude(8, .semibold))
-                    }
-                    .foregroundColor(on ? theme.bg : theme.subtext)
-                    .frame(maxWidth: .infinity).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(on ? tint : theme.track))
-                    .overlay(RoundedRectangle(cornerRadius: 9)
-                        .stroke(on ? tint : theme.border, lineWidth: 1))
-                    .animation(.easeInOut(duration: 0.25), value: on)
+                if multi {
+                    Text("\(working.count) chats working").font(.claude(10, .semibold)).monospacedDigit().foregroundColor(theme.subtext)
+                } else {
+                    Text(fullLabel(soloMode)).font(.claude(10, .semibold)).foregroundColor(tint(forMode: soloMode))
                 }
             }
-            effortMeter(tint)
+            if multi {
+                VStack(spacing: 8) {
+                    ForEach(groups) { groupRow($0).transition(.opacity.combined(with: .move(edge: .top))) }
+                }
+                .animation(.smooth(duration: 0.35), value: groups.count)
+            } else {
+                richTiles(active: soloMode)
+                effortMeter(level: soloEffort, tint: tint(forMode: soloMode))
+            }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
+        .animation(.smooth(duration: 0.35), value: multi)
     }
 
-    private func effortMeter(_ tint: Color) -> some View {
-        let lvl = state.normalizedEffort
-        let idx = efforts.firstIndex(of: lvl)   // nil when settings.json has no effortLevel
+    /// The full 5-mode tile row, highlighting `active`.
+    private func richTiles(active: String) -> some View {
+        HStack(spacing: 6) {
+            ForEach(modes, id: \.key) { m in
+                let on = m.key == active
+                VStack(spacing: 4) {
+                    Image(systemName: m.icon).font(.system(size: 13, weight: .semibold))
+                    Text(m.label).font(.claude(8, .semibold))
+                }
+                .foregroundColor(on ? theme.bg : theme.subtext)
+                .frame(maxWidth: .infinity).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 9).fill(on ? tint(forMode: active) : theme.track))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(on ? tint(forMode: active) : theme.border, lineWidth: 1))
+                .animation(.easeInOut(duration: 0.25), value: on)
+            }
+        }
+    }
+
+    /// One category: a tinted mode chip + effort pips + count, with the chats' prompts beneath.
+    private func groupRow(_ g: SettingGroup) -> some View {
+        let c = tint(forMode: g.mode)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                HStack(spacing: 4) {
+                    Image(systemName: modeIcon(g.mode)).font(.system(size: 10, weight: .bold))
+                    Text(modeLabel(g.mode)).font(.claude(9, .semibold))
+                }
+                .foregroundColor(theme.bg)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Capsule().fill(c))
+                effortPips(g.effort, c)
+                Text(g.effort.isEmpty ? "—" : effortLabel(g.effort)).font(.claude(9, .semibold)).foregroundColor(c)
+                Spacer(minLength: 0)
+                Text("\(g.sessions.count)").font(.claude(9, .bold)).monospacedDigit().foregroundColor(theme.subtext)
+                    .frame(minWidth: 14).padding(.vertical, 2).padding(.horizontal, 6)
+                    .background(Capsule().fill(theme.track))
+            }
+            ForEach(g.sessions.prefix(3)) { s in
+                HStack(spacing: 6) {
+                    Circle().fill(c).frame(width: 4, height: 4)
+                    Text(s.promptText ?? s.project).font(.claude(10)).foregroundColor(theme.subtext)
+                        .lineLimit(1).truncationMode(.tail)
+                }
+            }
+            if g.sessions.count > 3 {
+                Text("+\(g.sessions.count - 3) more").font(.claude(9)).foregroundColor(theme.subtext).padding(.leading, 10)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 11).fill(theme.track.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(c.opacity(0.35), lineWidth: 1))
+    }
+
+    /// Compact 5-segment effort meter for a group row.
+    private func effortPips(_ level: String, _ tint: Color) -> some View {
+        let idx = efforts.firstIndex(of: level)
+        return HStack(spacing: 3) {
+            ForEach(0..<efforts.count, id: \.self) { i in
+                Capsule().fill(idx != nil && i <= idx! ? tint : theme.track).frame(width: 7, height: 4)
+            }
+        }
+    }
+
+    private func effortMeter(level: String, tint: Color) -> some View {
+        let idx = efforts.firstIndex(of: level)   // nil when settings.json has no effortLevel
         return HStack(spacing: 8) {
             Text("Effort").font(.claude(11, .medium)).foregroundColor(theme.subtext)
             HStack(spacing: 4) {
                 ForEach(0..<efforts.count, id: \.self) { i in
                     let on = idx != nil && i <= idx!
-                    Capsule()
-                        .fill(on ? tint : theme.track)
-                        .frame(height: 5)
+                    Capsule().fill(on ? tint : theme.track).frame(height: 5)
                         // the leading edge of the meter glows brighter, so higher effort reads "hotter"
                         .opacity(on && i == idx ? 1 : (on ? 0.82 : 1))
                         .animation(.easeInOut(duration: 0.3), value: idx)
                 }
             }
-            Text(idx != nil ? effortLabel(lvl) : "—")
+            Text(idx != nil ? effortLabel(level) : "—")
                 .font(.claude(10, .semibold))
                 .foregroundColor(idx != nil ? tint : theme.subtext)
                 .frame(width: 52, alignment: .trailing)
-                .animation(.easeInOut(duration: 0.3), value: lvl)
+                .animation(.easeInOut(duration: 0.3), value: level)
         }
     }
 }
@@ -593,7 +677,7 @@ struct EdgeUsageView: View {
                                onDeny: { state.resolveCurrent(.deny) },
                                onAlways: { state.allowAlwaysCurrent() })
             }
-            ModeCard(state: state, theme: t)
+            ModeCard(state: state, theme: t, working: store.workingDebounced)
 
             if let plan = store.plan {
                 planCard(t, "Current", plan.fiveHourPct, plan.fiveHourReset, burn: store.burn)

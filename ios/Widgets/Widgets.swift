@@ -83,7 +83,10 @@ struct WorkingLiveActivity: Widget {
                 BirdBadge(state: s)
             } compactTrailing: {
                 if s.done {
-                    Image(systemName: "checkmark").foregroundColor(olive)
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark.circle.fill").font(.system(size: 13))
+                        Text("Done").font(.system(size: 13, weight: .semibold, design: .serif))
+                    }.foregroundColor(olive)
                 } else if let p = s.primary {
                     Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))

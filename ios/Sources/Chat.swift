@@ -379,8 +379,21 @@ struct ChatListView: View {
         guard let s = client.snapshot else { return false }
         return s.working.contains { $0.isEditor || $0.id == editorId }
     }
+    /// Every OTHER chat currently running on the Mac (not the editor hero) — so two (or more)
+    /// working chats all appear and are tappable, even ones you haven't opened as a thread yet.
+    private var workingRemote: [EdgeSnapshot.Working] {
+        var seen = Set<String>()
+        return (client.snapshot?.working ?? []).filter { w in
+            guard !w.isEditor, w.id != editorId, !seen.contains(w.id) else { return false }
+            seen.insert(w.id); return true   // dedupe: a duplicate id would break the ForEach
+        }
+    }
     private var otherThreads: [ChatThread] {
-        store.threads.filter { $0.id != editorId && $0.sessionId != editorId }
+        let workingIds = Set(workingRemote.map { $0.id })
+        return store.threads.filter {
+            $0.id != editorId && $0.sessionId != editorId
+                && !workingIds.contains($0.id) && !workingIds.contains($0.sessionId ?? "")
+        }
     }
 
     var body: some View {
@@ -402,6 +415,19 @@ struct ChatListView: View {
                                                busy: editorBusy,
                                                lastPrompt: client.snapshot?.promptHistory?.first?.text)
                             }.buttonStyle(.plain)
+                        }
+
+                        if !workingRemote.isEmpty {
+                            HStack {
+                                Text("RUNNING NOW").font(.claude(10, .semibold)).tracking(0.8).foregroundColor(T.green)
+                                Spacer()
+                                Text("\(workingRemote.count)").font(.claude(10, .semibold)).foregroundColor(T.green)
+                            }.padding(.top, 4)
+                            ForEach(workingRemote) { w in
+                                NavigationLink {
+                                    ChatThreadView(sessionId: w.id, project: w.project, cwd: w.cwd)
+                                } label: { RunningRow(w: w) }.buttonStyle(.plain)
+                            }
                         }
 
                         if !otherThreads.isEmpty {
@@ -647,6 +673,27 @@ private struct EditorHeroCard: View {
             }
         )
         .shadow(color: T.accent.opacity(0.18), radius: 16, x: 0, y: 6)
+    }
+}
+
+/// A chat currently running on the Mac (other than your editor) — live status + timer.
+private struct RunningRow: View {
+    let w: EdgeSnapshot.Working
+    var body: some View {
+        Card {
+            HStack(spacing: 11) {
+                PulsingDot()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(w.project).font(.claude(15, .semibold)).foregroundColor(T.text).lineLimit(1)
+                    Text("\u{201C}\(w.display)\u{201D}").font(.claude(11)).italic().foregroundColor(T.subtext).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if let at = w.promptAt {
+                    Text(at, style: .timer).font(.claude(13, .semibold)).foregroundColor(T.green).monospacedDigit()
+                }
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundColor(T.subtext)
+            }
+        }
     }
 }
 

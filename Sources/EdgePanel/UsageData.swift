@@ -450,6 +450,8 @@ struct LiveSession: Identifiable {
     var queuedPrompts: Int = 0  // prompts you typed while this turn runs, waiting their turn
     var queuedTexts: [String] = []  // the actual queued prompt texts (waiting their turn), in order
     var isEditor: Bool = false  // a GUI editor session (claude-vscode/desktop) you're watching → excluded from the Island
+    var modeKey: String = "ask"     // this chat's permission mode (ask|edit|plan|auto|bypass)
+    var effortKey: String = ""      // this chat's reasoning effort (low|medium|high|xhigh|max|"")
     /// Still generating: you prompted and the turn hasn't finished (no end_turn
     /// yet — covers long tool calls), and the transcript is recent enough not to
     /// be an abandoned/crashed turn.
@@ -596,11 +598,18 @@ extension UsageLoader {
             // transcript dir for history), not the latest cwd. project label stays the
             // latest cwd basename (more meaningful for "where work is happening").
             let resumeCwd = Self.headCwd(u) ?? cwdFull
+            // This chat's OWN mode + effort, so multiple open chats can each show their setting.
+            // mode = the latest permissionMode in this transcript; effort = this project's effort.
+            var rawMode: String?
+            for o in objs { if let m = o["permissionMode"] as? String, !m.isEmpty { rawMode = m } }   // keep the latest
+            let modeKey = Self.normMode(rawMode)
+            let effortKey = Self.normEffort(Self.currentEffort(cwd: resumeCwd))
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
                                    cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
                                    runningAgents: runningAgents, queuedPrompts: queuedPrompts,
-                                   queuedTexts: queuedTexts, isEditor: isEditor))
+                                   queuedTexts: queuedTexts, isEditor: isEditor,
+                                   modeKey: modeKey, effortKey: effortKey))
         }
         return out
     }
@@ -629,14 +638,41 @@ extension UsageLoader {
     /// settings.json (low|medium|high|xhigh|max). Claude Code persists the effort slider
     /// there; it is NOT exposed to hooks, the statusline, or the transcript, so settings.json
     /// is the only way to surface it. settings.local.json overrides settings.json. nil if unset.
-    static func currentEffort() -> String? {
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        for name in [".claude/settings.local.json", ".claude/settings.json"] {
-            guard let data = try? Data(contentsOf: home.appendingPathComponent(name)),
-                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            if let e = (j["effortLevel"] as? String) ?? (j["effort"] as? String), !e.isEmpty { return e }
+    static func currentEffort(cwd: String = "") -> String? {
+        // A project's own .claude settings override the global one — so two open chats in
+        // different projects can show different efforts. Check the project dir first, then home.
+        var bases: [URL] = []
+        if !cwd.isEmpty { bases.append(URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath)) }
+        bases.append(URL(fileURLWithPath: NSHomeDirectory()))
+        for base in bases {
+            for name in [".claude/settings.local.json", ".claude/settings.json"] {
+                guard let data = try? Data(contentsOf: base.appendingPathComponent(name)),
+                      let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                if let e = (j["effortLevel"] as? String) ?? (j["effort"] as? String), !e.isEmpty { return e }
+            }
         }
         return nil
+    }
+
+    /// Permission mode collapsed to a stable key: ask|edit|plan|auto|bypass.
+    static func normMode(_ raw: String?) -> String {
+        switch (raw ?? "").lowercased() {
+        case "bypasspermissions", "bypass":         return "bypass"
+        case "acceptedits", "accept_edits", "edit": return "edit"
+        case "plan":                                return "plan"
+        case "auto":                                return "auto"
+        default:                                    return "ask"
+        }
+    }
+    /// Effort collapsed to Claude Code's 5 levels (xhigh tested before high). "" = unknown.
+    static func normEffort(_ raw: String?) -> String {
+        let e = (raw ?? "").lowercased()
+        if e.contains("max") || e.contains("ultra")                          { return "max" }
+        if e.contains("xhigh") || e.contains("x-high") || e.contains("extra") { return "xhigh" }
+        if e.contains("high") { return "high" }
+        if e.contains("med")  { return "medium" }
+        if e.contains("low")  { return "low" }
+        return ""
     }
 
     /// The permission mode of the session you're actually using — the latest `permissionMode`

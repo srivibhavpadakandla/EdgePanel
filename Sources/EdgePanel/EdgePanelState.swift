@@ -642,7 +642,7 @@ final class EdgePanelState: ObservableObject {
             APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState)
             pendingEndTask?.cancel()
             pendingEndTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 4_000_000_000)   // hold "✓ Complete" visibly on the Island
+                try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly on the Island
                 guard let self, !Task.isCancelled,
                       self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
                       self.activityPushTokens["edgepanel"] == token // …and the same activity
