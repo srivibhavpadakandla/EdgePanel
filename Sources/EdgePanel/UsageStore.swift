@@ -120,7 +120,9 @@ final class UsageStore: ObservableObject {
     /// (the gap between two turns, or a mid-write transcript) doesn't spam a false
     /// "finished" notification.
     private func detectEnded() {
-        let workingNow = Dictionary(uniqueKeysWithValues: sessions.filter { $0.isWorking() }.map { ($0.id, $0) })
+        // Merging init (not uniqueKeysWithValues:) so a duplicate session id — same transcript
+        // uuid surfacing under two project dirs — can't trap. Mirrors byId below.
+        let workingNow = Dictionary(sessions.filter { $0.isWorking() }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         // Index ALL current sessions (incl. just-finished) so the done notification's
         // token count reflects the turn's final message, not a stale 0.
         let byId = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
