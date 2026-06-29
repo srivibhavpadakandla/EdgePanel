@@ -50,6 +50,7 @@ struct EdgeSnapshot: Codable {
         var turnTokens: Int
         var runningAgents: Int = 0   // in-flight Task subagents this turn
         var queuedPrompts: Int = 0   // prompts typed while this turn runs, waiting their turn
+        var queuedTexts: [String] = []   // the actual queued prompt texts, in order
         var isEditor: Bool = false   // editor session you're watching at the Mac → kept off the Island
         var promptAt: Date? { promptAtEpoch.map { Date(timeIntervalSince1970: $0) } }
         /// The prompt to show: the Mac's summary if present, else the raw prompt.

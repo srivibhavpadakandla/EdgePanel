@@ -53,6 +53,7 @@ struct EdgeSnapshot: Codable {
         var turnTokens: Int
         var runningAgents: Int = 0
         var queuedPrompts: Int = 0
+        var queuedTexts: [String] = []   // the actual queued prompt texts, waiting their turn
         var isEditor: Bool = false   // editor session you're watching → kept off the Island
     }
     struct Chat: Codable {
@@ -118,7 +119,8 @@ struct EdgeSnapshot: Codable {
             Working(id: sn.id, project: sn.project, cwd: sn.cwd, model: sn.model.map(prettyModel),
                     prompt: sn.promptText, promptSummary: store.promptSummaries[sn.id],
                     promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens,
-                    runningAgents: sn.runningAgents, queuedPrompts: sn.queuedPrompts, isEditor: sn.isEditor)
+                    runningAgents: sn.runningAgents, queuedPrompts: sn.queuedPrompts,
+                    queuedTexts: sn.queuedTexts, isEditor: sn.isEditor)
         }
         let chats = store.recentChats.map { c in
             Chat(id: c.id, name: c.name(summaries: store.promptSummaries), project: c.project,

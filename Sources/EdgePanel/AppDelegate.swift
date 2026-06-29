@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // of working chats changes, so the Island stops the instant a turn finishes.
         store.onWorkingChanged = { [weak self] w in self?.state.pushAggregate(working: w) }
         store.onModeChanged = { [weak self] m in self?.state.permissionMode = m }
+        store.onEffortChanged = { [weak self] e in self?.state.setEffort(e) }
 
         startServer()
         startLANServer()

@@ -405,7 +405,10 @@ struct ModeCard: View {
         .init(key: "auto",   label: "Auto",   icon: "bolt.fill"),
         .init(key: "bypass", label: "Bypass", icon: "infinity"),
     ]
-    private let efforts = ["low", "medium", "high", "ultra"]
+    private let efforts = ["low", "medium", "high", "xhigh", "max"]
+    private func effortLabel(_ key: String) -> String {
+        switch key { case "xhigh": return "X-High"; case "max": return "Max"; default: return key.capitalized }
+    }
 
     private func fullLabel(_ key: String) -> String {
         switch key {
@@ -450,20 +453,25 @@ struct ModeCard: View {
 
     private func effortMeter(_ tint: Color) -> some View {
         let lvl = state.normalizedEffort
-        let idx = efforts.firstIndex(of: lvl)   // nil when Claude Code hasn't reported effort
+        let idx = efforts.firstIndex(of: lvl)   // nil when settings.json has no effortLevel
         return HStack(spacing: 8) {
             Text("Effort").font(.claude(11, .medium)).foregroundColor(theme.subtext)
             HStack(spacing: 4) {
                 ForEach(0..<efforts.count, id: \.self) { i in
+                    let on = idx != nil && i <= idx!
                     Capsule()
-                        .fill(idx != nil && i <= idx! ? tint : theme.track)
+                        .fill(on ? tint : theme.track)
                         .frame(height: 5)
+                        // the leading edge of the meter glows brighter, so higher effort reads "hotter"
+                        .opacity(on && i == idx ? 1 : (on ? 0.82 : 1))
+                        .animation(.easeInOut(duration: 0.3), value: idx)
                 }
             }
-            Text(idx != nil ? lvl.capitalized : "—")
+            Text(idx != nil ? effortLabel(lvl) : "—")
                 .font(.claude(10, .semibold))
                 .foregroundColor(idx != nil ? tint : theme.subtext)
-                .frame(width: 46, alignment: .trailing)
+                .frame(width: 52, alignment: .trailing)
+                .animation(.easeInOut(duration: 0.3), value: lvl)
         }
     }
 }

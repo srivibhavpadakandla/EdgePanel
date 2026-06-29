@@ -130,9 +130,39 @@ final class EdgePanelState: ObservableObject {
     /// edits), "acceptEdits" (Edit automatically), "plan", "bypassPermissions". Drives the
     /// mascot animation so the creature visibly reflects how hands-off the session is.
     @Published var permissionMode: String?
-    /// Reasoning effort if a statusline ever surfaces it (Claude Code doesn't expose it to
-    /// hooks today, so this stays nil unless a custom statusline emits "effort").
+    /// Reasoning effort — read from Claude Code's `effortLevel` in settings.json (it's not in
+    /// hooks/transcript, so settings.json is the only source). low|medium|high|xhigh|max.
     @Published var effort: String?
+    /// When effort CHANGES, this holds that level's signature animation for a few seconds so
+    /// the mascot visibly "shifts gears" — each effort reads as a distinct creature.
+    @Published var effortPreview: String?
+    private var effortPreviewTimer: Timer?
+
+    /// Apply a freshly-read effort level. On a genuine change, flash the matching animation.
+    func setEffort(_ raw: String?) {
+        let was = normalizedEffort
+        effort = raw
+        let now = normalizedEffort
+        guard !was.isEmpty, !now.isEmpty, now != was else { return }   // skip the initial set; only flash on real changes
+        effortPreview = effortAnim(now)
+        effortPreviewTimer?.invalidate()
+        effortPreviewTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+            self?.effortPreview = nil
+        }
+    }
+
+    /// The signature animation for an effort level — the "gear" the creature shifts into,
+    /// escalating low → max. Each level is visually distinct.
+    func effortAnim(_ level: String) -> String {
+        switch level {
+        case "max":    return "dance_djmix"     // all-out, most kinetic
+        case "xhigh":  return "dance_bounce"    // hyped
+        case "high":   return "work_coding"     // intense focus
+        case "medium": return "work_think"      // steady thought
+        case "low":    return "idle_breathe"    // light touch
+        default:       return "expression_sleep"
+        }
+    }
 
     func handle(_ event: HookEvent) {
         if let label = event.projectLabel { projectLabel = label }
@@ -197,10 +227,12 @@ final class EdgePanelState: ObservableObject {
         }
     }
 
-    /// Effort collapsed to: "low" | "medium" | "high" | "ultra" | "" (unknown).
+    /// Effort collapsed to Claude Code's 5 levels: "low" | "medium" | "high" | "xhigh" |
+    /// "max" | "" (unknown). Order matters: "xhigh" contains "high", so test it first.
     var normalizedEffort: String {
         let e = (effort ?? "").lowercased()
-        if e.contains("ultra") || e.contains("max") { return "ultra" }
+        if e.contains("max") || e.contains("ultra")               { return "max" }
+        if e.contains("xhigh") || e.contains("x-high") || e.contains("extra") { return "xhigh" }
         if e.contains("high")  { return "high" }
         if e.contains("med")   { return "medium" }
         if e.contains("low")   { return "low" }
@@ -219,6 +251,9 @@ final class EdgePanelState: ObservableObject {
             return "idle_blink"                                                         // green: calm wait
         }
         if pendingQuestion != nil { return "idle_look_around" }                          // curious
+        // 2.5 Effort just changed — flash that effort's signature animation for a few seconds
+        // so each level reads as a distinct creature, regardless of mode.
+        if let ep = effortPreview { return ep }
         // 3. Working — the permission MODE sets the posture (bypass/auto/edit/plan/ask).
         if phase == .running {
             switch normalizedMode {
@@ -232,9 +267,10 @@ final class EdgePanelState: ObservableObject {
         // 4. Just finished — celebrate, energy scaled to effort.
         if phase == .done {
             switch normalizedEffort {
-            case "ultra", "high": return "dance_djmix"
-            case "medium":        return "dance_bounce"
-            default:              return "dance_sway"
+            case "max", "xhigh": return "dance_djmix"
+            case "high":         return "dance_bounce"
+            case "medium":       return "dance_sway"
+            default:             return "expression_wink"
             }
         }
         // 5. Failed — surprised.
@@ -252,13 +288,7 @@ final class EdgePanelState: ObservableObject {
     /// Ask mode is the "manual" mode, so let EFFORT pick the working animation — this is
     /// where low / medium / high / ultracode each read as a distinct creature.
     private func effortWorkAnim() -> String {
-        switch normalizedEffort {
-        case "ultra":  return "dance_bounce"   // ultracode — hyped, all-out
-        case "high":   return "work_coding"    // intense focus
-        case "medium": return "work_think"     // steady thought
-        case "low":    return "idle_breathe"   // light touch
-        default:       return "work_coding"    // effort unknown → plain coding
-        }
+        normalizedEffort.isEmpty ? "work_coding" : effortAnim(normalizedEffort)
     }
 
     /// Colour that pairs with the mascot animation — risk first, then mode. Hot for

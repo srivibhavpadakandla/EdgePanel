@@ -107,6 +107,10 @@ final class UsageStore: ObservableObject {
     /// so the state/mascot/ModeCard reflect the mode you actually set in Claude Code.
     var onModeChanged: ((String) -> Void)?
     private var lastMode: String?
+    /// Fires when the reasoning-effort level (read from settings.json) changes, so the mascot
+    /// flashes that effort's signature animation and the meter reflects the real level.
+    var onEffortChanged: ((String?) -> Void)?
+    private var lastEffort: String = "\u{0}"   // sentinel so the first read always applies
 
     // The live editor session — the one you're working in at the Mac (most-recent
     // interactive transcript). The phone's "Editor" chat targets this and types into it.
@@ -119,8 +123,10 @@ final class UsageStore: ObservableObject {
         sessionQ.async {
             let sessions = UsageLoader.activeSessions()
             let mode = UsageLoader.currentPermissionMode()
+            let eff = UsageLoader.currentEffort()
             DispatchQueue.main.async {
                 if let mode, mode != self.lastMode { self.lastMode = mode; self.onModeChanged?(mode) }
+                if (eff ?? "") != self.lastEffort { self.lastEffort = eff ?? ""; self.onEffortChanged?(eff) }
                 // Track the live editor session (cheap: id cached 30s; cwd resolved only on change).
                 let eid = self.currentInteractiveId()
                 if eid != self.editorSessionId {

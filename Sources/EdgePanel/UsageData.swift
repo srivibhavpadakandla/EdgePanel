@@ -448,6 +448,7 @@ struct LiveSession: Identifiable {
     let turnComplete: Bool    // the latest assistant turn ended (stop_reason end_turn)
     var runningAgents: Int = 0  // in-flight Task subagents this turn (tool_use w/o a tool_result yet)
     var queuedPrompts: Int = 0  // prompts you typed while this turn runs, waiting their turn
+    var queuedTexts: [String] = []  // the actual queued prompt texts (waiting their turn), in order
     var isEditor: Bool = false  // a GUI editor session (claude-vscode/desktop) you're watching → excluded from the Island
     /// Still generating: you prompted and the turn hasn't finished (no end_turn
     /// yet — covers long tool calls), and the transcript is recent enough not to
@@ -570,11 +571,13 @@ extension UsageLoader {
                 }
             }
             let runningAgents = turnComplete ? 0 : taskIds.subtracting(resolvedIds).count
-            var typedSinceTerminal = 0
+            var typedTexts: [String] = []
             for (i, o) in objs.enumerated() where i > lastTerminalAssistant {
-                if userPromptText(o) != nil { typedSinceTerminal += 1 }
+                if let t = userPromptText(o) { typedTexts.append(t) }
             }
-            let queuedPrompts = turnComplete ? 0 : max(0, typedSinceTerminal - 1)
+            // dropFirst = the prompt that STARTED this turn; the rest are queued, waiting.
+            let queuedTexts = turnComplete ? [] : Array(typedTexts.dropFirst())
+            let queuedPrompts = queuedTexts.count
 
             var project = "session"
             var cwdFull = ""
@@ -596,7 +599,8 @@ extension UsageLoader {
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
                                    cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
-                                   runningAgents: runningAgents, queuedPrompts: queuedPrompts, isEditor: isEditor))
+                                   runningAgents: runningAgents, queuedPrompts: queuedPrompts,
+                                   queuedTexts: queuedTexts, isEditor: isEditor))
         }
         return out
     }
@@ -618,6 +622,20 @@ extension UsageLoader {
         }
         cands.sort { $0.date > $1.date }
         for c in cands.prefix(8) where isInteractiveSession(c.url) { return c.id }
+        return nil
+    }
+
+    /// The reasoning-effort level Claude Code is set to — read from `effortLevel` in
+    /// settings.json (low|medium|high|xhigh|max). Claude Code persists the effort slider
+    /// there; it is NOT exposed to hooks, the statusline, or the transcript, so settings.json
+    /// is the only way to surface it. settings.local.json overrides settings.json. nil if unset.
+    static func currentEffort() -> String? {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        for name in [".claude/settings.local.json", ".claude/settings.json"] {
+            guard let data = try? Data(contentsOf: home.appendingPathComponent(name)),
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let e = (j["effortLevel"] as? String) ?? (j["effort"] as? String), !e.isEmpty { return e }
+        }
         return nil
     }
 

@@ -599,16 +599,14 @@ struct WorkingRow: View {
                     Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
                 }
             }
-            // Live proof-of-work: subagents running + prompts waiting in line.
-            if w.runningAgents > 0 || w.queuedPrompts > 0 {
-                HStack(spacing: 7) {
-                    if w.runningAgents > 0 {
-                        StatusPill(icon: "person.2.fill", text: "\(w.runningAgents) agent\(w.runningAgents == 1 ? "" : "s") working", color: T.green)
-                    }
-                    if w.queuedPrompts > 0 {
-                        StatusPill(icon: "tray.full.fill", text: "\(w.queuedPrompts) queued", color: T.subtext)
-                    }
-                }
+            // Live proof-of-work: subagents running + the actual prompts waiting in line.
+            if w.runningAgents > 0 {
+                StatusPill(icon: "person.2.fill", text: "\(w.runningAgents) agent\(w.runningAgents == 1 ? "" : "s") working", color: T.green)
+            }
+            if !w.queuedTexts.isEmpty {
+                QueuedList(texts: w.queuedTexts)
+            } else if w.queuedPrompts > 0 {
+                StatusPill(icon: "tray.full.fill", text: "\(w.queuedPrompts) queued", color: T.subtext)
             }
         }
         .padding(.vertical, 4)
@@ -641,6 +639,33 @@ struct StatusPill: View {
         .foregroundColor(color)
         .padding(.horizontal, 7).padding(.vertical, 2)
         .background(Capsule().fill(color.opacity(0.15)))
+    }
+}
+
+/// The actual prompts you've typed that are waiting their turn — shown verbatim
+/// (numbered, newest-typed last) instead of a bare "N queued" count.
+struct QueuedList: View {
+    let texts: [String]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                Image(systemName: "tray.full.fill").font(.system(size: 9, weight: .semibold))
+                Text("\(texts.count) queued").font(.claude(10, .semibold))
+            }.foregroundColor(T.subtext)
+            ForEach(Array(texts.enumerated()), id: \.offset) { i, t in
+                HStack(alignment: .top, spacing: 7) {
+                    Text("\(i + 1)").font(.claude(10, .bold)).foregroundColor(T.subtext)
+                        .frame(minWidth: 13, alignment: .trailing)
+                    Text(t).font(.claude(12.5)).foregroundColor(T.text.opacity(0.85))
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 9).fill(T.track.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(T.border, lineWidth: 1))
     }
 }
 
