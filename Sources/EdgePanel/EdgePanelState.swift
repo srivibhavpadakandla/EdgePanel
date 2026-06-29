@@ -323,7 +323,8 @@ final class EdgePanelState: ObservableObject {
 
     private func pushQuestionAlert(_ q: PendingQuestion) {
         let first = q.items.first
-        let body = first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer"
+        // Redact like the permission path — don't ship a secret in the question text through APNs/ntfy.
+        let body = Self.redactSecrets(first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer")
         if APNsPusher.shared.enabled, let dt = devicePushToken {
             APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body)
         }
@@ -525,17 +526,18 @@ final class EdgePanelState: ObservableObject {
     /// Push an "end" Live Activity update + alert when a session finishes — so the
     /// phone updates even if the app is closed. No-op unless APNs is configured.
     func pushSessionEnded(_ s: LiveSession) {
+        // Editor sessions (claude-vscode/desktop) are watched at the Mac — they drive NEITHER the
+        // Island done-caption NOR a phone "finished" push (you don't need a ping for your own
+        // on-screen turn). Bail entirely so the alert below doesn't fire for them either.
+        guard !s.isEditor else { return }
         let elapsed = s.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
         let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
         let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
         let baseDetail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
-        // Only a NON-editor finish sets the Island's done caption (editor sessions aren't on
-        // the Island), and when several end in the same scan show an aggregate count instead of
+        // When several non-editor chats finish in one scan, show an aggregate count instead of
         // just the last one's detail. endsThisScan is reset by pushAggregate (the scan-closing call).
-        if !s.isEditor {
-            endsThisScan += 1
-            lastFinishedDetail = endsThisScan > 1 ? "\(endsThisScan) chats finished" : baseDetail
-        }
+        endsThisScan += 1
+        lastFinishedDetail = endsThisScan > 1 ? "\(endsThisScan) chats finished" : baseDetail
         let project = s.project, cwd = s.cwd, dt = devicePushToken
         // Outcome Card: enrich the "done" alert with WHAT changed (git working-tree diff),
         // computed off-main so the git call never blocks the UI.

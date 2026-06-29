@@ -904,8 +904,20 @@ extension UsageLoader {
         // Lossy decode: the tail can start mid-codepoint, where String(data:utf8:)
         // returns nil and silently drops all history. Dropping the partial first line
         // removes any replacement chars from the split.
-        var text = String(decoding: data, as: UTF8.self)
-        if start > 0, let nl = text.firstIndex(of: "\n") { text = String(text[text.index(after: nl)...]) }
+        let text = String(decoding: data, as: UTF8.self)
+        if start > 0 {
+            if let nl = text.firstIndex(of: "\n") {
+                return String(text[text.index(after: nl)...])
+            }
+            // No newline in the tail window → the final record is a single line larger than
+            // maxBytes (a multi-MB tool_result / pasted blob). The window holds only a
+            // truncated, unparseable fragment, so re-read the whole file (capped) to recover
+            // that record intact instead of returning garbage.
+            if let whole = try? Data(contentsOf: url), whole.count <= 64_000_000 {
+                return String(decoding: whole, as: UTF8.self)
+            }
+            return nil
+        }
         return text
     }
 }

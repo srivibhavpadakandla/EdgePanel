@@ -40,7 +40,7 @@ struct WorkingLiveActivity: Widget {
                             Label("done", systemImage: "checkmark.circle.fill").foregroundColor(olive)
                                 .font(.system(size: 13, weight: .semibold))
                         } else if let p = s.primary {
-                            Text(p.start, style: .timer)
+                            Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                                 .font(.system(size: 15, weight: .semibold, design: .monospaced))
                                 .foregroundColor(olive).monospacedDigit()
                                 .lineLimit(1).minimumScaleFactor(0.6)
@@ -85,7 +85,7 @@ struct WorkingLiveActivity: Widget {
                 if s.done {
                     Image(systemName: "checkmark").foregroundColor(olive)
                 } else if let p = s.primary {
-                    Text(p.start, style: .timer)
+                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 56)
                 }
@@ -137,7 +137,7 @@ private struct SessionRow: View {
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(s.start, style: .timer)
+                Text(timerInterval: s.start...s.freezeEnd, countsDown: false)
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 58, alignment: .trailing)
                 Text(workNote(s).map { "\(fmtTok(s.tokens)) tok · \($0)" }
@@ -163,7 +163,7 @@ struct LockScreenView: View {
                 if state.done {
                     Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundColor(olive)
                 } else if let p = state.primary {
-                    Text(p.start, style: .timer)
+                    Text(timerInterval: p.start...p.freezeEnd, countsDown: false)
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))
                         .foregroundColor(olive).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6).frame(maxWidth: 74, alignment: .trailing)
                 }

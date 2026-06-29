@@ -24,7 +24,11 @@ enum AllowlistWriter {
                                          "command", "nice", "ionice", "stdbuf", "setsid", "timeout", "eval"]
             if wrappers.contains(first) { return "Bash" }
             let subcommanded = ["git", "npm", "pnpm", "yarn", "brew", "docker", "kubectl", "gh", "cargo", "pip", "pip3"]
-            if tokens.count >= 2, subcommanded.contains(first), isSafeRuleToken(tokens[1]) {
+            // tokens[1] must be a real subcommand, not a GLOBAL FLAG — "git -C /other status" or
+            // "git -c core.pager=cat …" would otherwise mint "Bash(git -C *)" / "Bash(git -c *)",
+            // a far broader grant than the user approved. A flag-led invocation falls through to
+            // the tight-but-not-flag "Bash(git *)" instead.
+            if tokens.count >= 2, subcommanded.contains(first), !tokens[1].hasPrefix("-"), isSafeRuleToken(tokens[1]) {
                 return "Bash(\(first) \(tokens[1]) *)"
             }
             return "Bash(\(first) *)"

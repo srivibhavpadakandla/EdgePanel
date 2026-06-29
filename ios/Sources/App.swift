@@ -59,8 +59,20 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     // can't suppress alerts when you actually need them.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        let isRemote = notification.request.trigger is UNPushNotificationTrigger
-        completionHandler(isRemote ? [] : [.banner, .sound])
+        guard notification.request.trigger is UNPushNotificationTrigger else {
+            completionHandler([.banner, .sound]); return   // local (usage/forecast) — no on-screen equivalent
+        }
+        // Remote APNs duplicate: suppress ONLY if the LAN poll already surfaced this exact
+        // permission/question in-app. If it hasn't (e.g. the phone is off-LAN so /snapshot
+        // never delivered the card), this push is the ONLY actionable surface — let it through.
+        let info = notification.request.content.userInfo
+        if let pid = info["permId"] as? String, pid == ActivityManager.shared.surfacedPermId {
+            completionHandler([]); return
+        }
+        if let qid = info["questionId"] as? String, qid == ActivityManager.shared.surfacedQuestionId {
+            completionHandler([]); return
+        }
+        completionHandler([.banner, .sound])
     }
 
     // Allow / Deny tapped on a permission notification → resolve it on the Mac.
@@ -216,7 +228,7 @@ struct PlanCard: View {
 struct QuestionCard: View {
     @EnvironmentObject var client: EdgeClient
     let q: EdgeSnapshot.Question
-    @State private var sel: [String: Set<String>] = [:]   // question → chosen labels
+    @State private var sel: [Int: Set<String>] = [:]   // item INDEX → chosen labels (text isn't unique across items)
 
     var body: some View {
         Card {
@@ -227,19 +239,19 @@ struct QuestionCard: View {
                     Spacer()
                     if let p = q.project { Text(p).font(.claude(10)).foregroundColor(T.subtext) }
                 }
-                ForEach(q.items) { item in
+                ForEach(Array(q.items.enumerated()), id: \.offset) { idx, item in
                     VStack(alignment: .leading, spacing: 7) {
                         Text(item.question).font(.claude(13, .semibold)).foregroundColor(T.text)
                         if item.multiSelect {
                             Text("pick one or more").font(.claude(10)).foregroundColor(T.subtext)
                         }
                         ForEach(item.options, id: \.label) { opt in
-                            Button { toggle(item, opt.label) } label: {
+                            Button { toggle(idx, item, opt.label) } label: {
                                 HStack(spacing: 9) {
-                                    Image(systemName: isSel(item, opt.label)
+                                    Image(systemName: isSel(idx, opt.label)
                                           ? (item.multiSelect ? "checkmark.square.fill" : "checkmark.circle.fill")
                                           : (item.multiSelect ? "square" : "circle"))
-                                        .foregroundColor(isSel(item, opt.label) ? T.accent : T.subtext)
+                                        .foregroundColor(isSel(idx, opt.label) ? T.accent : T.subtext)
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(opt.label).font(.claude(13, .medium)).foregroundColor(T.text)
                                         if let d = opt.description, !d.isEmpty {
@@ -250,7 +262,7 @@ struct QuestionCard: View {
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(RoundedRectangle(cornerRadius: 9)
-                                    .fill(isSel(item, opt.label) ? T.accent.opacity(0.16) : T.track.opacity(0.5)))
+                                    .fill(isSel(idx, opt.label) ? T.accent.opacity(0.16) : T.track.opacity(0.5)))
                             }.buttonStyle(.plain)
                         }
                     }
@@ -265,20 +277,21 @@ struct QuestionCard: View {
         .background(RoundedRectangle(cornerRadius: 16).strokeBorder(T.accent.opacity(0.55), lineWidth: 1.2))
     }
 
-    private var answered: Bool { q.items.allSatisfy { !(sel[$0.question] ?? []).isEmpty } }
-    private func isSel(_ item: EdgeSnapshot.Question.Item, _ label: String) -> Bool {
-        (sel[item.question] ?? []).contains(label)
-    }
-    private func toggle(_ item: EdgeSnapshot.Question.Item, _ label: String) {
-        var s = sel[item.question] ?? []
+    private var answered: Bool { q.items.indices.allSatisfy { !(sel[$0] ?? []).isEmpty } }
+    private func isSel(_ idx: Int, _ label: String) -> Bool { (sel[idx] ?? []).contains(label) }
+    private func toggle(_ idx: Int, _ item: EdgeSnapshot.Question.Item, _ label: String) {
+        var s = sel[idx] ?? []
         if item.multiSelect { if s.contains(label) { s.remove(label) } else { s.insert(label) } }
         else { s = [label] }
-        sel[item.question] = s
+        sel[idx] = s
     }
     private func submit() {
+        // Internal selection is by index, but the wire answers map stays keyed by question text
+        // (the hook contract). Last-writer-wins if two items share text — unavoidable on the wire,
+        // but the on-screen selection is now per-item-correct.
         var answers: [String: String] = [:]
-        for item in q.items {
-            let chosen = item.options.map { $0.label }.filter { (sel[item.question] ?? []).contains($0) }
+        for (idx, item) in q.items.enumerated() {
+            let chosen = item.options.map { $0.label }.filter { (sel[idx] ?? []).contains($0) }
             answers[item.question] = chosen.joined(separator: ",")
         }
         client.answerQuestion(id: q.id, answers: answers)

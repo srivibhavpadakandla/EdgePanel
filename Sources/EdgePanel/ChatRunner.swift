@@ -186,6 +186,7 @@ final class ChatRunner: @unchecked Sendable {
 
     private func finish(_ jid: String, _ job: Job) {
         lock.lock(); jobs[jid] = job; procs[jid] = nil
+        cancelIntent.remove(jid)   // drop any queued cancel intent (launch-fail / cancelled-before-track / normal exit)
         if let sid = jobSession.removeValue(forKey: jid) { resuming.remove(sid) }   // release the in-flight lock
         // Evict old jobs so the map doesn't grow unbounded over a long session.
         if jobs.count > 24 {

@@ -35,7 +35,7 @@ final class ChatStore: ObservableObject {
     @Published var busyJob: [String: String] = [:]   // thread id → running jobId (for Stop / reattach)
     @Published var reconnecting: Set<String> = []    // threads whose Mac link dropped (UI hint)
     private var stopping: Set<String> = []           // threads the user asked to stop (streamJob bails next tick)
-    private var activeStreams: Set<String> = []      // threads with a live poll loop (no double-pollers)
+    private var activeStreams: [String: UUID] = [:]  // thread id → live poll loop's ownership token (no double-pollers)
 
     private let url: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -69,14 +69,17 @@ final class ChatStore: ObservableObject {
             let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: cwd)
             guard !hist.isEmpty, !busy.contains(threadId),
                   let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
-            // Don't clobber with a SHORTER transcript: a turn that just finished (or a
-            // local-only error/"Stopped" bubble) can leave the device ahead of the
-            // server's lagging JSONL — replacing then would drop the newest messages.
-            guard hist.count >= threads[i].messages.count else { return }
-            // Preserve a trailing local "Stopped"/error marker ONLY at the equal-length
-            // boundary (where the server isn't strictly ahead) — if the server gained a real
-            // new reply (strictly longer), show that instead.
-            let trailingMarker = (threads[i].messages.last?.role == .error && hist.count == threads[i].messages.count)
+            // A trailing local .error marker ("■ Stopped"/failure) is device-only — the
+            // transcript never has it. Exclude it from the "is the device ahead?" comparison
+            // so it doesn't inflate the count it's measured against (which would FREEZE future
+            // refreshes until the server grew by 2), and don't clobber real local content.
+            let hasMarker = threads[i].messages.last?.role == .error
+            let localContent = threads[i].messages.count - (hasMarker ? 1 : 0)
+            guard hist.count >= localContent else { return }
+            // Re-attach the marker only at the equal boundary AND only when the transcript did
+            // NOT land a real reply past it — otherwise that recovered assistant turn IS the
+            // answer and re-appending the stale "Stopped" would shadow it + show a bogus Retry.
+            let trailingMarker = (hasMarker && hist.count == localContent && hist.last?.role != "assistant")
                 ? threads[i].messages.last : nil
             threads[i].messages = hist.map {
                 ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text)
@@ -124,7 +127,7 @@ final class ChatStore: ObservableObject {
     func stop(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }
         stopping.insert(id)
-        activeStreams.remove(id)   // free the stream slot NOW so a quick Retry isn't dropped by the activeStreams guard
+        activeStreams[id] = nil   // free the stream slot NOW so a quick Retry isn't dropped by the activeStreams guard
         busy.remove(id); busyJob[id] = nil
         if let i = threads.firstIndex(where: { $0.id == id }),
            threads[i].messages.last?.role != .assistant {
@@ -162,9 +165,13 @@ final class ChatStore: ObservableObject {
     /// live job can't deliver — Mac restarted, job evicted, or the app was backgrounded past a
     /// timeout — the reply is RECOVERED from the session transcript (the source of truth).
     private func streamJob(_ jobId: String, into threadId: String) async {
-        guard !activeStreams.contains(threadId) else { return }   // already streaming this thread
-        activeStreams.insert(threadId)
-        defer { activeStreams.remove(threadId) }
+        guard activeStreams[threadId] == nil else { return }   // already streaming this thread
+        let streamToken = UUID()
+        activeStreams[threadId] = streamToken
+        // Only clear the slot if WE still own it: a stopped-then-retried stream's defer must
+        // not evict the replacement stream's slot (which would let reconnectInFlight spawn a
+        // second concurrent poller for the same thread). Ownership token closes that race.
+        defer { if activeStreams[threadId] == streamToken { activeStreams[threadId] = nil } }
         busyJob[threadId] = jobId; busy.insert(threadId)
         // Reattach to the in-progress bubble if one already exists (reconnect after foreground).
         var streamId: UUID? = inProgressBubbleId(threadId)
@@ -269,7 +276,7 @@ final class ChatStore: ObservableObject {
     }
     func delete(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }   // kill the Mac claude process
-        stopping.insert(id); activeStreams.remove(id)                            // streamJob loop bails next tick
+        stopping.insert(id); activeStreams[id] = nil                            // streamJob loop bails next tick
         threads.removeAll { $0.id == id }
         busy.remove(id); busyJob[id] = nil                                       // drop the orphan job before save()
         save()
@@ -311,7 +318,7 @@ final class ChatStore: ObservableObject {
     /// Re-attach to every in-flight turn (after a relaunch or returning to the foreground):
     /// resume polling its job, and if the job is gone, recover the reply from the transcript.
     func reconnectInFlight() {
-        for (threadId, jobId) in busyJob where !activeStreams.contains(threadId) {
+        for (threadId, jobId) in busyJob where activeStreams[threadId] == nil {
             Task { await streamJob(jobId, into: threadId) }
         }
     }

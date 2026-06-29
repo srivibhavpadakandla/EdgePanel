@@ -17,6 +17,8 @@ final class ActivityManager {
     private var alertedAt: Set<Int> = []   // thresholds already alerted this window
     private var lastPermId: String?        // permission request already surfaced
     private var lastQuestionId: String?    // question already surfaced
+    var surfacedPermId: String? { lastPermId }       // for willPresent dedup
+    var surfacedQuestionId: String? { lastQuestionId }
     private var pushTokenTask: Task<Void, Never>?
     private var endTask: Task<Void, Never>?   // deferred "done→end" (cancellable if a new turn arrives)
     private var emptyTicks = 0                 // consecutive syncs with no working sessions (done debounce)

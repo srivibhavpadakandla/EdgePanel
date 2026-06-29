@@ -234,10 +234,13 @@ public enum RiskEngine {
             || underHome("/.bashrc") || underHome("/.bash_profile") || underHome("/.profile")
             || lower.hasPrefix("/private/var/at/tabs")
 
-        if inSystem || (writing && sensitiveUser) {
-            return RiskAssessment(level: .danger,
-                                  reason: writing ? "writes a sensitive file" : "reads a system file",
-                                  alwaysDangerous: writing)
+        if inSystem || sensitiveUser {
+            // sensitiveUser is alwaysDangerous for BOTH read and write — READING ~/.ssh/id_rsa
+            // or a credential file is exfiltration and must surface a tap even in Autonomous;
+            // a system-file READ stays a (surfaced) danger but not always-dangerous.
+            let reason = sensitiveUser ? (writing ? "writes a credential/persistence file" : "reads a credential/persistence file")
+                                       : (writing ? "writes a system file" : "reads a system file")
+            return RiskAssessment(level: .danger, reason: reason, alwaysDangerous: sensitiveUser || writing)
         }
         if writing {
             return RiskAssessment(level: .write, reason: inWorkspace ? "edits a project file" : "writes outside the workspace", alwaysDangerous: false)
