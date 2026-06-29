@@ -94,12 +94,13 @@ struct RootView: View {
     @EnvironmentObject var client: EdgeClient
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPair = false
+    @State private var tab = 0
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             UsageTab(showPair: $showPair)
-                .tabItem { Label("Usage", systemImage: "gauge.with.dots.needle.bottom.50percent") }
+                .tabItem { Label("Usage", systemImage: "gauge.with.dots.needle.bottom.50percent") }.tag(0)
             ChatListView()
-                .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
+                .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }.tag(1)
         }
         .tint(T.accent)
         .sheet(isPresented: $showPair) { PairSheet().environmentObject(client) }

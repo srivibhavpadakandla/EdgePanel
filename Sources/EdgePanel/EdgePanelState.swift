@@ -666,17 +666,20 @@ final class EdgePanelState: ObservableObject {
         // just the last one's detail. endsThisScan is reset by pushAggregate (the scan-closing call).
         endsThisScan += 1
         lastFinishedDetail = endsThisScan > 1 ? "\(endsThisScan) chats finished" : baseDetail
-        let project = s.project, cwd = s.cwd, dt = devicePushToken
+        let project = s.project, cwd = s.cwd, dt = devicePushToken, sid = s.id, prompt = s.promptText
         // Outcome Card: enrich the "done" alert with WHAT changed (git working-tree diff),
-        // computed off-main so the git call never blocks the UI.
+        // computed off-main so the git call never blocks the UI. Title the alert by the CHAT's
+        // name (Claude Code's ai-title, else the turn's prompt) rather than the project folder.
         DispatchQueue.global(qos: .utility).async {
+            let name = UsageLoader.sessionDisplayName(sessionId: sid, cwd: cwd, fallbackPrompt: prompt, fallbackProject: project)
             let outcome = Self.gitOutcome(cwd: cwd)               // " · 2 files +40−5: ChatRunner.swift, …"
             let body = baseDetail + outcome
+            let title = "✓ \(name)"
             DispatchQueue.main.async {
                 if APNsPusher.shared.enabled, let dt {
-                    APNsPusher.shared.pushAlert(deviceToken: dt, title: "✓ \(project) finished", body: body)
+                    APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
                 }
-                if elapsed >= 15 { NtfyPusher.shared.pushDone(title: "✓ \(project) finished", detail: body) }
+                if elapsed >= 15 { NtfyPusher.shared.pushDone(title: title, detail: body) }
             }
         }
     }

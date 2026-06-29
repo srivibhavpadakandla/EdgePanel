@@ -368,24 +368,48 @@ struct ChatListView: View {
     @State private var pendingOpenId: String?
     @State private var renameId: String?
     @State private var renameText = ""
+
+    // The live editor session (the chat open in VS Code/Cursor on your Mac) — typing here
+    // types into it. It's pinned as a hero card and excluded from the regular thread list.
+    private var editorId: String? {
+        let id = client.snapshot?.editorSessionId
+        return (id?.isEmpty == false) ? id : nil
+    }
+    private var editorBusy: Bool {
+        guard let s = client.snapshot else { return false }
+        return s.working.contains { $0.isEditor || $0.id == editorId }
+    }
+    private var otherThreads: [ChatThread] {
+        store.threads.filter { $0.id != editorId && $0.sessionId != editorId }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
                 T.bg.ignoresSafeArea()
-                if store.threads.isEmpty {
+                ScrollView {
                     VStack(spacing: 12) {
-                        Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 34)).foregroundColor(T.accent2)
-                        Text("Drive Claude Code from here").font(.claude(15, .semibold)).foregroundColor(T.text)
-                        Text("Tap ＋ to start a new task in any project on your Mac — it runs autonomously and streams back here. Or open a session from WORKING NOW on the Usage tab.")
-                            .font(.claude(12)).foregroundColor(T.subtext).multilineTextAlignment(.center).padding(.horizontal, 34)
-                        Button { showNew = true } label: {
-                            Label("New Task", systemImage: "plus.circle.fill").font(.claude(14, .semibold))
-                        }.buttonStyle(.borderedProminent).tint(T.accent).padding(.top, 4)
-                    }
-                } else {
-                    ScrollView {
-                        VStack(spacing: 10) {
-                            ForEach(store.threads) { t in
+                        // PINNED: your live editor session — type here, it types into your Mac.
+                        if let eid = editorId {
+                            NavigationLink {
+                                ChatThreadView(sessionId: eid,
+                                               project: client.snapshot?.editorProject ?? "Editor",
+                                               cwd: client.snapshot?.editorCwd ?? "")
+                            } label: {
+                                EditorHeroCard(project: client.snapshot?.editorProject ?? "Editor",
+                                               cwd: client.snapshot?.editorCwd ?? "",
+                                               mode: client.snapshot?.mode ?? "ask",
+                                               busy: editorBusy,
+                                               lastPrompt: client.snapshot?.promptHistory?.first?.text)
+                            }.buttonStyle(.plain)
+                        }
+
+                        if !otherThreads.isEmpty {
+                            HStack {
+                                Text("YOUR CHATS").font(.claude(10, .semibold)).tracking(0.8).foregroundColor(T.subtext)
+                                Spacer()
+                            }.padding(.top, 4)
+                            ForEach(otherThreads) { t in
                                 NavigationLink {
                                     ChatThreadView(sessionId: t.id, project: t.project, cwd: t.cwd)
                                 } label: { ThreadRow(t: t, busy: store.busy.contains(t.id)) }
@@ -395,8 +419,21 @@ struct ChatListView: View {
                                         Button(role: .destructive) { store.delete(t.id) } label: { Label("Delete", systemImage: "trash") }
                                     }
                             }
-                        }.padding(16)
+                        }
+
+                        if editorId == nil && otherThreads.isEmpty {
+                            VStack(spacing: 12) {
+                                Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 34)).foregroundColor(T.accent2)
+                                Text("Drive Claude Code from here").font(.claude(15, .semibold)).foregroundColor(T.text)
+                                Text("Open Claude Code in VS Code or Cursor on your Mac and it appears here as your Editor — type on your phone and it types into it. Or tap ＋ to start a new autonomous task.")
+                                    .font(.claude(12)).foregroundColor(T.subtext).multilineTextAlignment(.center).padding(.horizontal, 26)
+                                Button { showNew = true } label: {
+                                    Label("New Task", systemImage: "plus.circle.fill").font(.claude(14, .semibold))
+                                }.buttonStyle(.borderedProminent).tint(T.accent).padding(.top, 4)
+                            }.padding(.top, 70)
+                        }
                     }
+                    .padding(16)
                 }
             }
             .navigationTitle("Command")
@@ -547,6 +584,79 @@ struct NewTaskSheet: View {
     }
 }
 
+/// The hero card for your live editor session — the chat open in VS Code/Cursor on your
+/// Mac. Distinct, alive, and the centerpiece: tap in and what you type types into it.
+private struct EditorHeroCard: View {
+    let project: String
+    let cwd: String
+    let mode: String
+    let busy: Bool
+    let lastPrompt: String?
+    @State private var pulse = false
+
+    private var modeLabel: String {
+        switch mode { case "bypass": return "Bypass"; case "edit": return "Edit"; case "plan": return "Plan"
+        case "auto": return "Auto"; default: return "Ask" }
+    }
+    private var modeColor: Color {
+        switch mode { case "bypass": return T.red; case "edit": return T.amber; case "auto": return T.accent; default: return T.accent2 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                ZStack {
+                    Circle().fill(T.green.opacity(0.30)).frame(width: 18, height: 18)
+                        .scaleEffect(pulse ? 1.7 : 0.8).opacity(pulse ? 0 : 0.9)
+                    Circle().fill(T.green).frame(width: 8, height: 8)
+                }
+                .frame(width: 18, height: 18)
+                Text("YOUR EDITOR").font(.claude(10, .semibold)).tracking(1.0).foregroundColor(T.green)
+                Spacer()
+                Text(modeLabel).font(.claude(10, .semibold)).foregroundColor(modeColor)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(modeColor.opacity(0.16)))
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 15, weight: .bold)).foregroundColor(T.accent)
+                Text(project).font(.claude(20, .bold)).foregroundColor(T.text).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            if busy {
+                HStack(spacing: 7) {
+                    ThinkingDots()
+                    Text("Claude is working in your editor…").font(.claude(12.5, .medium)).foregroundColor(T.accent)
+                }
+            } else if let p = lastPrompt, !p.isEmpty {
+                Text(p).font(.claude(12.5)).foregroundColor(T.subtext).lineLimit(1)
+            } else {
+                Text("Ready — open the chat and type").font(.claude(12.5)).foregroundColor(T.subtext)
+            }
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .bold))
+                Text("Type here → types into Claude Code on your Mac").font(.claude(11, .medium))
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundColor(T.accent2)
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(LinearGradient(colors: [T.accent.opacity(0.16), T.cardTop, T.cardBot],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(LinearGradient(colors: [T.accent.opacity(0.5), T.border], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            }
+        )
+        .shadow(color: T.accent.opacity(0.18), radius: 16, x: 0, y: 6)
+        .onAppear { withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true } }
+    }
+}
+
 private struct ThreadRow: View {
     let t: ChatThread
     let busy: Bool
@@ -570,22 +680,38 @@ private struct ThreadRow: View {
 
 struct ChatThreadView: View {
     @ObservedObject private var store = ChatStore.shared
+    @EnvironmentObject var client: EdgeClient
     let sessionId: String
     let project: String
     let cwd: String
     @State private var draft = ""
     @State private var atBottom = true
+    @State private var justSentToEditor = false
     @FocusState private var focused: Bool
 
     private var thread: ChatThread? { store.thread(sessionId) }
     private var busy: Bool { store.busy.contains(sessionId) }
     private var messages: [ChatMessage] { thread?.messages ?? [] }
     private var thinking: Bool { busy && messages.last?.role == .user }   // sent, nothing back yet
+    /// This thread IS the live editor session — sends type straight into Claude Code on the Mac.
+    private var isEditor: Bool { sessionId == client.snapshot?.editorSessionId }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             T.bg.ignoresSafeArea()
             VStack(spacing: 0) {
+                if isEditor {
+                    HStack(spacing: 7) {
+                        Circle().fill(T.green).frame(width: 7, height: 7)
+                        Text("Live — what you type types into Claude Code on your Mac")
+                            .font(.claude(11, .medium)).foregroundColor(T.green)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity)
+                    .background(T.green.opacity(0.08))
+                    .overlay(Rectangle().fill(T.border).frame(height: 1), alignment: .bottom)
+                }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
@@ -593,7 +719,7 @@ struct ChatThreadView: View {
                                 MessageView(message: m, streaming: busy && m.id == messages.last?.id && m.role == .assistant)
                                     .id(m.id)
                             }
-                            if thinking { ThinkingRow().id("thinking") }
+                            if thinking { ThinkingRow(label: isEditor ? "Typed into your editor · waiting for Claude…" : nil).id("thinking") }
                             Color.clear.frame(height: 1).id("bottom")
                                 .onAppear { atBottom = true }.onDisappear { atBottom = false }
                         }
@@ -647,12 +773,14 @@ struct ChatThreadView: View {
         VStack(spacing: 0) {
             Rectangle().fill(T.border).frame(height: 1)
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Reply to Claude…", text: $draft, axis: .vertical)
+                TextField(isEditor ? "Type into your editor…" : "Reply to Claude…", text: $draft, axis: .vertical)
                     .font(.claude(15.5)).foregroundColor(T.text)
                     .focused($focused).lineLimit(1...6)
                     .padding(.horizontal, 15).padding(.vertical, 11)
                     .background(RoundedRectangle(cornerRadius: 22).fill(T.card))
-                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(T.border, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 22)
+                        .stroke(focused ? T.accent.opacity(0.6) : T.border, lineWidth: 1))
+                    .animation(.easeInOut(duration: 0.2), value: focused)
                 if busy {
                     Button { store.stop(sessionId) } label: {
                         Image(systemName: "stop.circle.fill").font(.system(size: 32)).foregroundColor(T.red)
@@ -673,6 +801,7 @@ struct ChatThreadView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         store.send(sessionId, text); draft = ""; focused = false
     }
 }
@@ -720,13 +849,18 @@ private struct MessageView: View {
 }
 
 private struct ThinkingRow: View {
+    var label: String? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
                 Image(systemName: "bird.fill").font(.system(size: 11)).foregroundColor(T.accent)
                 Text("Claude").font(.claude(11, .semibold)).tracking(0.4).foregroundColor(T.subtext)
             }
-            ThinkingDots()
+            if let label {
+                HStack(spacing: 7) { ThinkingDots(); Text(label).font(.claude(12, .medium)).foregroundColor(T.subtext) }
+            } else {
+                ThinkingDots()
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

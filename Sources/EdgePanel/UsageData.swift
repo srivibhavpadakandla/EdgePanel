@@ -954,22 +954,70 @@ extension UsageLoader {
     /// The recent conversation of a session (your prompts + Claude's text replies),
     /// oldest→newest, for showing the real chat thread on the phone. Tail-reads so
     /// it's cheap even on a huge transcript (older messages beyond the tail drop off).
-    static func sessionMessages(sessionId: String, cwd: String = "", limit: Int = 200) -> [(role: String, text: String)] {
+    /// Resolve a session id → its transcript file. Fast path: Claude Code encodes the cwd
+    /// (every non-alphanumeric → '-') as the project dir; else enumerate.
+    static func sessionFileURL(sessionId: String, cwd: String = "") -> URL? {
         let base = projectsBase()
-        var url: URL?
-        if !cwd.isEmpty {   // fast path: Claude Code encodes the cwd as the project dir name
-            // CC replaces EVERY non-alphanumeric char with '-' (so '_', spaces, '.' etc.),
-            // not just '/' and '.' — otherwise the fast path missed and fell back to a scan.
+        if !cwd.isEmpty {
             let encoded = String(cwd.map { ($0.isLetter || $0.isNumber) ? $0 : "-" })
             let candidate = base.appendingPathComponent(encoded).appendingPathComponent("\(sessionId).jsonl")
-            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate }
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
         }
-        if url == nil, let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: nil) {
+        if let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: nil) {
             while let u = en.nextObject() as? URL {
-                if u.lastPathComponent == "\(sessionId).jsonl" { url = u; break }
+                if u.lastPathComponent == "\(sessionId).jsonl" { return u }
             }
         }
-        guard let url, let text = tailString(url, maxBytes: 4_000_000) else { return [] }
+        return nil
+    }
+
+    /// Did a human-typed prompt containing `needle` just land at the END of this session's
+    /// transcript? Verifies a phone→editor injection actually reached the chat input (a
+    /// submitted message = a user record; a mid-turn one = a queued_command attachment —
+    /// both surface via userPromptText). The just-typed prompt is the last thing written,
+    /// so a small tail catches it.
+    static func typedPromptLanded(sessionId: String, cwd: String, needle: String) -> Bool {
+        let key = String(needle.prefix(64)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, let url = sessionFileURL(sessionId: sessionId, cwd: cwd),
+              let text = tailString(url, maxBytes: 524_288) else { return false }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        for sub in lines.suffix(80).reversed() {
+            guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any],
+                  let t = userPromptText(o) else { continue }
+            if t.contains(key) { return true }
+        }
+        return false
+    }
+
+    /// A human-readable NAME for a session — Claude Code's own ai-title (read from the
+    /// transcript head) if present, else a short form of `fallbackPrompt`, else
+    /// `fallbackProject`. Lets the "finished" notification be titled by the CHAT you're in,
+    /// not just the project folder.
+    static func sessionDisplayName(sessionId: String, cwd: String = "",
+                                   fallbackPrompt: String? = nil, fallbackProject: String = "") -> String {
+        if let url = sessionFileURL(sessionId: sessionId, cwd: cwd),
+           let fh = try? FileHandle(forReadingFrom: url) {
+            let data = (try? fh.read(upToCount: 524_288)) ?? Data()
+            try? fh.close()
+            for sub in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true) {
+                guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any] else { continue }
+                if (o["type"] as? String) == "ai-title",
+                   let t = ((o["aiTitle"] as? String) ?? (o["title"] as? String))?
+                            .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+                    return t
+                }
+            }
+        }
+        if let p = fallbackPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !p.isEmpty, !p.hasPrefix("["), !p.hasPrefix("{") {
+            return p.count <= 56 ? p : String(p.prefix(56)) + "…"
+        }
+        return fallbackProject.isEmpty ? "Claude Code" : fallbackProject
+    }
+
+    static func sessionMessages(sessionId: String, cwd: String = "", limit: Int = 200) -> [(role: String, text: String)] {
+        guard let url = sessionFileURL(sessionId: sessionId, cwd: cwd),
+              let text = tailString(url, maxBytes: 4_000_000) else { return [] }
         var out: [(role: String, text: String)] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else { continue }

@@ -108,6 +108,12 @@ final class UsageStore: ObservableObject {
     var onModeChanged: ((String) -> Void)?
     private var lastMode: String?
 
+    // The live editor session — the one you're working in at the Mac (most-recent
+    // interactive transcript). The phone's "Editor" chat targets this and types into it.
+    @Published var editorSessionId: String?
+    @Published var editorCwd: String = ""
+    @Published var editorProject: String = ""
+
     func refreshSessions() {
         let gen = nextSessionGen()
         sessionQ.async {
@@ -115,6 +121,16 @@ final class UsageStore: ObservableObject {
             let mode = UsageLoader.currentPermissionMode()
             DispatchQueue.main.async {
                 if let mode, mode != self.lastMode { self.lastMode = mode; self.onModeChanged?(mode) }
+                // Track the live editor session (cheap: id cached 30s; cwd resolved only on change).
+                let eid = self.currentInteractiveId()
+                if eid != self.editorSessionId {
+                    self.editorSessionId = eid
+                    if let eid, let url = UsageLoader.sessionFileURL(sessionId: eid) {
+                        let c = UsageLoader.headCwd(url) ?? ""
+                        self.editorCwd = c
+                        self.editorProject = c.isEmpty ? "Editor" : (c as NSString).lastPathComponent
+                    } else { self.editorCwd = ""; self.editorProject = "" }
+                }
                 guard gen > self.appliedSessionGen else { return }   // a fresher scan already applied — drop this stale one
                 self.appliedSessionGen = gen
                 self.sessions = sessions
@@ -140,9 +156,14 @@ final class UsageStore: ObservableObject {
         for (id, prev) in prevWorking where workingNow[id] == nil {
             let misses = (endMisses[id] ?? 0) + 1
             if misses >= 2 {                       // gone for 2 scans → really finished
-                // No phone "finished" ping for the session you're actively watching on
-                // this Mac — it just spams a notification for your own on-screen turn.
-                if id != interactiveId { onSessionEnded?(byId[id] ?? prev) }
+                // Fire the "finished" phone push. For the session you're actively watching on
+                // this Mac, only ping for turns that ran a while (≥20s) — you don't need a buzz
+                // for a quick on-screen reply, but a long turn likely means you stepped away.
+                // Remote/phone sessions always ping. (The phone also suppresses the banner while
+                // its app is foreground, so you're only alerted when you're not looking at it.)
+                let ended = byId[id] ?? prev
+                let elapsed = ended.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
+                if id != interactiveId || elapsed >= 20 { onSessionEnded?(ended) }
                 endMisses[id] = nil
             } else {                               // first miss → keep tracking, don't fire yet
                 endMisses[id] = misses

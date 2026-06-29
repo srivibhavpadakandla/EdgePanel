@@ -186,9 +186,9 @@ final class ChatRunner: @unchecked Sendable {
             // apart from existing history in the transcript.
             let baseAssistants = UsageLoader.sessionMessages(sessionId: sessionId, cwd: cwd, limit: 400)
                 .filter { $0.role == "assistant" }.count
-            guard EditorInjector.shared.inject(text: message) else {
+            guard EditorInjector.shared.inject(text: message, sessionId: sessionId, cwd: cwd) else {
                 self.finish(jid, Job(status: "error",
-                    error: "couldn't deliver to your editor — open the Claude Code chat in VS Code/Cursor and try again"))
+                    error: "couldn't type into your editor — make sure the Claude Code chat is open in VS Code/Cursor"))
                 return
             }
             // Watch the transcript: stream the growing reply into job.result, finish when the

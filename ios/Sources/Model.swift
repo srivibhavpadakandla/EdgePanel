@@ -16,6 +16,9 @@ struct EdgeSnapshot: Codable {
     var effort: String?              // reasoning effort: low | medium | high | ultra | "" unknown
     var mascotAnim: String?          // live mascot posture name (mirrors the Mac creature)
     var promptHistory: [PromptItem]? // recent human-typed prompts, newest first
+    var editorSessionId: String?     // the live editor session — typing here types into it
+    var editorCwd: String?
+    var editorProject: String?
 
     struct PromptItem: Codable, Identifiable {
         var id: String

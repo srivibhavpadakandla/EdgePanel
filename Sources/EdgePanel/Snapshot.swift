@@ -18,6 +18,11 @@ struct EdgeSnapshot: Codable {
     var effort: String = ""         // reasoning effort: low | medium | high | ultra | "" (unknown)
     var mascotAnim: String = "idle_blink"   // live mascot posture — phone can mirror it
     var promptHistory: [PromptItem] = []    // recent human-typed prompts, newest first
+    // The live editor session you're working in at the Mac — the phone's "Editor" chat
+    // targets this so typing on the phone types into the Claude Code chat open here.
+    var editorSessionId: String?
+    var editorCwd: String = ""
+    var editorProject: String = ""
 
     struct PromptItem: Codable {
         var id: String
@@ -143,6 +148,9 @@ struct EdgeSnapshot: Codable {
                             promptHistory: store.promptHistory.map {
                                 PromptItem(id: $0.id, text: $0.text,
                                            atEpoch: $0.at.timeIntervalSince1970, project: $0.project)
-                            })
+                            },
+                            editorSessionId: store.editorSessionId,
+                            editorCwd: store.editorCwd,
+                            editorProject: store.editorProject)
     }
 }

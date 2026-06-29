@@ -43,11 +43,15 @@ final class EditorInjector: @unchecked Sendable {
         Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
     }
 
-    /// Type `text` into the live Claude Code chat in the frontmost editor. Returns false
-    /// if no editor. MUST be called off the main thread (it blocks ~2s).
+    /// Type `text` into the live Claude Code chat in the frontmost editor, and CONFIRM it
+    /// landed by watching the session transcript for the new typed prompt — retrying if the
+    /// first focus/paste didn't take (the extension's Cmd+Esc focus can toggle the input off
+    /// when it's already focused, so a single blind paste isn't reliable). Returns true only
+    /// when the message is verified in the transcript. MUST be called off the main thread.
     @discardableResult
-    func inject(text: String) -> Bool {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+    func inject(text: String, sessionId: String, cwd: String) -> Bool {
+        let needle = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return false }
         let pb = NSPasteboard.general
         // AppKit (find editor, set clipboard, activate) on main — snapshot the user's
         // clipboard so we can restore it after the paste (don't destroy their copied text).
@@ -61,14 +65,45 @@ final class EditorInjector: @unchecked Sendable {
         guard saved != nil else { return false }
         usleep(650_000)                                  // let the editor come forward
 
-        // PRIMARY: focus → paste → submit via System Events (Accessibility). Electron/
-        // Chromium honors these synthetic events far more reliably than raw CGEvents.
+        var landed = false
+        for attempt in 0..<3 {
+            // A slow transcript flush from a PRIOR attempt may have already delivered the
+            // message — re-check before pasting again so we never double-submit.
+            if attempt > 0 {
+                if UsageLoader.typedPromptLanded(sessionId: sessionId, cwd: cwd, needle: needle) { landed = true; break }
+                _ = onMain { self.runningEditor()?.activate(options: [.activateIgnoringOtherApps]); return 0 }
+                usleep(400_000)
+            }
+            pasteAndSubmit()
+            // Verify: watch the transcript for the typed prompt to appear (submitted = a user
+            // record, queued mid-turn = a queued_command attachment — both count).
+            let deadline = Date().addingTimeInterval(4)
+            while Date() < deadline {
+                usleep(400_000)
+                if UsageLoader.typedPromptLanded(sessionId: sessionId, cwd: cwd, needle: needle) { landed = true; break }
+            }
+            if landed { break }
+        }
+
+        // Restore the user's clipboard once we're done — but only if our text is still there
+        // (don't clobber something they copied in the meantime).
+        if let prior = saved, !prior.isEmpty {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                self.onMain { if pb.string(forType: .string) == text { pb.clearContents(); pb.setString(prior, forType: .string) } }
+            }
+        }
+        return landed
+    }
+
+    /// One focus → paste → submit pass. PRIMARY: System Events (Accessibility) — Electron/
+    /// Chromium honors these synthetic events far more reliably than raw CGEvents (cliclick).
+    private func pasteAndSubmit() {
         let typed = runOsascript("""
         tell application "System Events"
           key code 53 using command down
           delay 0.45
           keystroke "v" using command down
-          delay 0.75
+          delay 0.6
           key code 36
         end tell
         """, timeout: 6)
@@ -77,14 +112,6 @@ final class EditorInjector: @unchecked Sendable {
             run(cli, ["kd:cmd", "t:v", "ku:cmd"]); usleep(900_000)
             run(cli, ["kp:return"])
         }
-        // Restore the user's clipboard once the paste is done — but only if our text is
-        // still there (don't clobber something they copied in the meantime).
-        if let prior = saved, !prior.isEmpty {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                self.onMain { if pb.string(forType: .string) == text { pb.clearContents(); pb.setString(prior, forType: .string) } }
-            }
-        }
-        return true
     }
 
     /// Interrupt the running turn in the live editor session (Escape stops generation).
