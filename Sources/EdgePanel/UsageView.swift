@@ -387,6 +387,115 @@ struct PermissionCard: View {
 }
 
 
+// MARK: - Mode + Effort readout
+//
+// Mirrors Claude Code's mode picker: the 5 permission modes as live tiles (the one
+// the session is actually in lights up in its tint), plus the effort meter. EdgePanel
+// only OBSERVES the mode — the human sets it in Claude Code — so this is a readout, not
+// a control. The same mode drives the mascot's animation up top.
+struct ModeCard: View {
+    @ObservedObject var state: EdgePanelState
+    let theme: Theme
+
+    private struct Mode { let key, label, icon: String }
+    private let modes: [Mode] = [
+        .init(key: "ask",    label: "Ask",    icon: "hand.raised"),
+        .init(key: "edit",   label: "Edit",   icon: "chevron.left.forwardslash.chevron.right"),
+        .init(key: "plan",   label: "Plan",   icon: "list.bullet.rectangle"),
+        .init(key: "auto",   label: "Auto",   icon: "bolt.fill"),
+        .init(key: "bypass", label: "Bypass", icon: "infinity"),
+    ]
+    private let efforts = ["low", "medium", "high", "ultra"]
+
+    private func fullLabel(_ key: String) -> String {
+        switch key {
+        case "edit":   return "Edit automatically"
+        case "plan":   return "Plan mode"
+        case "auto":   return "Auto mode"
+        case "bypass": return "Bypass permissions"
+        default:       return "Ask before edits"
+        }
+    }
+
+    var body: some View {
+        let active = state.normalizedMode
+        let tint = state.modeTint(theme)
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Text("MODE").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
+                Spacer()
+                Text(fullLabel(active)).font(.claude(10, .semibold)).foregroundColor(tint)
+            }
+            HStack(spacing: 6) {
+                ForEach(modes, id: \.key) { m in
+                    let on = m.key == active
+                    VStack(spacing: 4) {
+                        Image(systemName: m.icon).font(.system(size: 13, weight: .semibold))
+                        Text(m.label).font(.claude(8, .semibold))
+                    }
+                    .foregroundColor(on ? theme.bg : theme.subtext)
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(on ? tint : theme.track))
+                    .overlay(RoundedRectangle(cornerRadius: 9)
+                        .stroke(on ? tint : theme.border, lineWidth: 1))
+                    .animation(.easeInOut(duration: 0.25), value: on)
+                }
+            }
+            effortMeter(tint)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
+    }
+
+    private func effortMeter(_ tint: Color) -> some View {
+        let lvl = state.normalizedEffort
+        let idx = efforts.firstIndex(of: lvl)   // nil when Claude Code hasn't reported effort
+        return HStack(spacing: 8) {
+            Text("Effort").font(.claude(11, .medium)).foregroundColor(theme.subtext)
+            HStack(spacing: 4) {
+                ForEach(0..<efforts.count, id: \.self) { i in
+                    Capsule()
+                        .fill(idx != nil && i <= idx! ? tint : theme.track)
+                        .frame(height: 5)
+                }
+            }
+            Text(idx != nil ? lvl.capitalized : "—")
+                .font(.claude(10, .semibold))
+                .foregroundColor(idx != nil ? tint : theme.subtext)
+                .frame(width: 46, alignment: .trailing)
+        }
+    }
+}
+
+
+// Focused, ScrollView-free composition of the new mode/effort surface — the mascot
+// (whose posture is the live animation) over the ModeCard. Used by /debug/render to
+// prove the feature headlessly, and a handy isolated preview.
+struct ModePreview: View {
+    @ObservedObject var state: EdgePanelState
+    var body: some View {
+        let t = Theme.resolve(.dark)
+        VStack(spacing: 16) {
+            HStack(spacing: 14) {
+                AnimatedMascot(name: state.mascotAnimName, cell: 3.0,
+                               fill: state.modeTint(t), eye: t.bg, crop: false)
+                    .frame(width: 72, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("MASCOT POSTURE").font(.claude(9, .semibold)).tracking(0.8).foregroundColor(t.subtext)
+                    Text(state.mascotAnimName).font(.claude(16, .semibold)).foregroundColor(state.modeTint(t))
+                }
+                Spacer(minLength: 0)
+            }
+            ModeCard(state: state, theme: t)
+        }
+        .padding(18)
+        .frame(width: 380)
+        .background(t.bg)
+    }
+}
+
+
 // MARK: - Root
 
 struct EdgeUsageView: View {
@@ -444,14 +553,12 @@ struct EdgeUsageView: View {
     private func usagePercent() -> Double { store.displayFiveHourPct ?? 0 }
 
     private func headerMascot(_ t: Theme) -> some View {
-        let name: String
-        switch state.phase {
-        case .failed:  name = "expression_surprise"
-        case .done:    name = "dance_bounce"
-        case .running: name = "work_coding"
-        case .idle:    name = usagePercent() >= 90 ? "expression_surprise" : "idle_blink"
-        }
-        return AnimatedMascot(name: name, cell: 2.2, fill: t.accent2, eye: t.bg, crop: false)
+        // The creature now reflects the live posture — waiting-permission risk, then the
+        // permission mode (bypass/auto/edit/plan/ask), then effort, then idle. See
+        // EdgePanelState.mascotAnimName. Bypass tints hot, plan cools, so even the colour reads.
+        AnimatedMascot(name: state.mascotAnimName, cell: 2.2,
+                       fill: state.modeTint(t), eye: t.bg, crop: false)
+            .animation(.easeInOut(duration: 0.35), value: state.mascotAnimName)
     }
 
     // MARK: content
@@ -478,6 +585,8 @@ struct EdgeUsageView: View {
                                onDeny: { state.resolveCurrent(.deny) },
                                onAlways: { state.allowAlwaysCurrent() })
             }
+            ModeCard(state: state, theme: t)
+
             if let plan = store.plan {
                 planCard(t, "Current", plan.fiveHourPct, plan.fiveHourReset, burn: store.burn)
             } else if let b = s.block {

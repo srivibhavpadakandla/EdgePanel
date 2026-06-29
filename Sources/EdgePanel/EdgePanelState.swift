@@ -126,8 +126,17 @@ final class EdgePanelState: ObservableObject {
 
     // MARK: - Hook ingestion (read-only /event)
 
+    /// Current Claude Code permission mode (from the hook payload): "default" (Ask before
+    /// edits), "acceptEdits" (Edit automatically), "plan", "bypassPermissions". Drives the
+    /// mascot animation so the creature visibly reflects how hands-off the session is.
+    @Published var permissionMode: String?
+    /// Reasoning effort if a statusline ever surfaces it (Claude Code doesn't expose it to
+    /// hooks today, so this stays nil unless a custom statusline emits "effort").
+    @Published var effort: String?
+
     func handle(_ event: HookEvent) {
         if let label = event.projectLabel { projectLabel = label }
+        if let pm = event.permissionMode, !pm.isEmpty { permissionMode = pm }
         switch event.eventName {
         case "UserPromptSubmit":
             setPhase(.running)
@@ -159,6 +168,114 @@ final class EdgePanelState: ObservableObject {
            let total = (cost["total_cost_usd"] as? Double) ?? (cost["total_cost_usd"] as? NSNumber)?.doubleValue {
             sessionCostUSD = total
         }
+        // Reasoning effort, if a custom statusline emits it (stock Claude Code doesn't pass
+        // it to hooks/statusline, so this stays nil otherwise — the mascot then leans on mode).
+        let model = j["model"] as? [String: Any]
+        if let e = (j["reasoning_effort"] as? String) ?? (j["effort"] as? String)
+                    ?? (model?["reasoning_effort"] as? String), !e.isEmpty {
+            effort = e
+        }
+    }
+
+    // MARK: - Live mascot animation ------------------------------------------
+    //
+    // One pixel creature, many postures. We can only show ONE animation at a time,
+    // so the axes are prioritised by "what does the human most need to read right
+    // now": a waiting permission (its RISK) outranks how the session is running
+    // (the permission MODE), which outranks how hard it's thinking (EFFORT), which
+    // outranks idle. Each branch picks a visually distinct anim so a glance decodes
+    // the session's posture — exactly the modes from Claude Code's picker.
+
+    /// Mode collapsed to a stable key: "ask" | "edit" | "plan" | "auto" | "bypass".
+    var normalizedMode: String {
+        switch (permissionMode ?? "").lowercased() {
+        case "bypasspermissions", "bypass":            return "bypass"
+        case "acceptedits", "accept_edits", "edit":    return "edit"
+        case "plan":                                   return "plan"
+        case "auto":                                   return "auto"
+        default:                                       return "ask"   // "default" / unknown
+        }
+    }
+
+    /// Effort collapsed to: "low" | "medium" | "high" | "ultra" | "" (unknown).
+    var normalizedEffort: String {
+        let e = (effort ?? "").lowercased()
+        if e.contains("ultra") || e.contains("max") { return "ultra" }
+        if e.contains("high")  { return "high" }
+        if e.contains("med")   { return "medium" }
+        if e.contains("low")   { return "low" }
+        return ""
+    }
+
+    /// The animation reflecting the live state. Drives both the panel mascot and the
+    /// menu-bar icon, so the creature visibly changes with mode / risk / effort.
+    var mascotAnimName: String {
+        // 1. Panic stop armed — frozen alarm, nothing else matters.
+        if panicArmed { return "expression_surprise" }
+        // 2. A permission is waiting on a human — react to its RISK (low/med/high).
+        if let p = pending {
+            if p.alwaysDangerous || p.risk == .danger { return "expression_surprise" } // red: alarmed
+            if p.risk == .write                       { return "idle_look_around" }     // amber: cautious
+            return "idle_blink"                                                         // green: calm wait
+        }
+        if pendingQuestion != nil { return "idle_look_around" }                          // curious
+        // 3. Working — the permission MODE sets the posture (bypass/auto/edit/plan/ask).
+        if phase == .running {
+            switch normalizedMode {
+            case "bypass": return "dance_djmix"     // full send, no gate — most kinetic
+            case "auto":   return "dance_sway"      // auto-pilot — smooth, hands-off
+            case "edit":   return "work_coding"     // editing automatically — heads-down
+            case "plan":   return "work_think"      // planning only — pondering, no edits
+            default:       return effortWorkAnim()  // Ask mode → EFFORT decides the intensity
+            }
+        }
+        // 4. Just finished — celebrate, energy scaled to effort.
+        if phase == .done {
+            switch normalizedEffort {
+            case "ultra", "high": return "dance_djmix"
+            case "medium":        return "dance_bounce"
+            default:              return "dance_sway"
+            }
+        }
+        // 5. Failed — surprised.
+        if phase == .failed { return "expression_surprise" }
+        // 6. Idle — mode-flavoured rest (or alarmed when the plan is maxed out).
+        if (statuslineContextPct ?? 0) >= 0.95 { return "expression_surprise" }
+        switch normalizedMode {
+        case "bypass": return "dance_sway"          // even at rest it's loose
+        case "plan":   return "idle_look_around"    // surveying
+        case "auto":   return "idle_breathe"
+        default:       return "idle_blink"
+        }
+    }
+
+    /// Ask mode is the "manual" mode, so let EFFORT pick the working animation — this is
+    /// where low / medium / high / ultracode each read as a distinct creature.
+    private func effortWorkAnim() -> String {
+        switch normalizedEffort {
+        case "ultra":  return "dance_bounce"   // ultracode — hyped, all-out
+        case "high":   return "work_coding"    // intense focus
+        case "medium": return "work_think"     // steady thought
+        case "low":    return "idle_breathe"   // light touch
+        default:       return "work_coding"    // effort unknown → plain coding
+        }
+    }
+
+    /// Colour that pairs with the mascot animation — risk first, then mode. Hot for
+    /// bypass / danger, amber for editing, cool for plan / ask, so the creature reads
+    /// at a glance even before you parse its motion.
+    func modeTint(_ t: Theme) -> Color {
+        if panicArmed { return t.red }
+        if let p = pending {
+            if p.alwaysDangerous || p.risk == .danger { return t.red }
+            if p.risk == .write { return t.amber }
+        }
+        switch normalizedMode {
+        case "bypass": return t.red
+        case "edit":   return t.amber
+        case "auto":   return t.accent
+        default:       return t.accent2   // plan / ask
+        }
     }
 
     private func describe(_ e: HookEvent) -> String {
@@ -183,6 +300,9 @@ final class EdgePanelState: ObservableObject {
     /// or until the timeout falls back to the native flow. Low-risk reads are
     /// auto-allowed so the panel only interrupts for writes and dangerous actions.
     func requestDecision(for event: HookEvent) async -> PermissionVerdict {
+        // A held permission hook may be the freshest signal of the session's mode — keep
+        // the mascot / ModeCard current even when no separate PreToolUse /event preceded it.
+        if let pm = event.permissionMode, !pm.isEmpty { permissionMode = pm }
         let assessment = RiskEngine.assess(toolName: event.toolName, event: event, cwd: event.cwd)
         // Panic Stop window → refuse EVERYTHING, reads included: the user hit Panic because
         // damage is in progress. The native flow re-asks once the 10s window clears, so benign

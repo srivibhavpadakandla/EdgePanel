@@ -135,12 +135,48 @@ struct UsageTab: View {
             .toolbar(.hidden, for: .navigationBar)
         }
     }
+    // The header bird wears the current mode's colour — hot for bypass/danger, amber for
+    // editing, cool for plan/ask — so the phone reads its posture at a glance like the Mac mascot.
+    private var birdTint: Color {
+        if let s = client.snapshot {
+            if s.pending?.risk == "danger" { return T.red }
+            if s.pending?.risk == "write"  { return T.amber }
+            switch s.mode {
+            case "bypass": return T.red
+            case "edit":   return T.amber
+            case "auto":   return T.accent
+            default:       return T.accent2
+            }
+        }
+        return T.accent2
+    }
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "bird.fill").foregroundColor(T.accent2)
-            Text("Usage").font(.claude(24, .semibold)).foregroundColor(T.text)
+            Image(systemName: "bird.fill").foregroundColor(birdTint)
+                .animation(.easeInOut(duration: 0.35), value: birdTint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Usage").font(.claude(24, .semibold)).foregroundColor(T.text)
+                // When the Mac is unreachable, keep showing the most recent data and say how old it is.
+                if !client.connected, let u = client.lastUpdated {
+                    Text("Offline · updated \(timeAgo(u))")
+                        .font(.claude(10, .medium)).foregroundColor(T.amber)
+                } else if let u = client.lastUpdated {
+                    Text("Updated \(timeAgo(u))")
+                        .font(.claude(10)).foregroundColor(T.subtext)
+                }
+            }
             Spacer()
             Circle().fill(client.connected ? T.green : T.red).frame(width: 8, height: 8)
+            Button {
+                Task { await client.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .foregroundColor(client.refreshing ? T.accent : T.subtext)
+                    .rotationEffect(.degrees(client.refreshing ? 360 : 0))
+                    .animation(client.refreshing ? .linear(duration: 0.8).repeatForever(autoreverses: false) : .default,
+                               value: client.refreshing)
+            }
+            .disabled(client.refreshing)
             Button { showPair = true } label: { Image(systemName: "gearshape").foregroundColor(T.subtext) }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -156,6 +192,7 @@ struct Dashboard: View {
                 if let q = s.question { QuestionCard(q: q).id(q.id) }   // fresh @State per question (no stale selection leak)
                 if let pend = s.pending { PermissionCard(p: pend) }
                 if let p = s.plan { PlanCard(plan: p) }
+                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk)
                 WorkingCard(working: s.working)
                 CalendarCard(days: s.calendar)
                 HStack(spacing: 12) {
@@ -163,6 +200,7 @@ struct Dashboard: View {
                     SpendCard(spend: s.spend)
                 }
                 RecentChatsCard(chats: s.chats)
+                PromptHistoryCard(prompts: s.promptHistory ?? [])
             } else {
                 VStack(spacing: 10) {
                     ProgressView().tint(T.accent)
@@ -175,6 +213,141 @@ struct Dashboard: View {
 }
 
 // MARK: - Cards
+
+// The phone's Prompt History: your recent typed prompts across chats, newest first,
+// each with its project + how long ago. Fed by the Mac's transcript scan.
+struct PromptHistoryCard: View {
+    let prompts: [EdgeSnapshot.PromptItem]
+    @State private var expanded = false
+    var body: some View {
+        if !prompts.isEmpty {
+            let shown = expanded ? Array(prompts.prefix(30)) : Array(prompts.prefix(8))
+            Card {
+                VStack(alignment: .leading, spacing: 11) {
+                    HStack {
+                        SectionLabel(text: "Prompt History")
+                        Spacer()
+                        Text("\(prompts.count)").font(.claude(11, .semibold)).foregroundColor(T.subtext)
+                    }
+                    ForEach(shown) { p in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(p.text).font(.claude(13)).foregroundColor(T.text)
+                                .lineLimit(2).multilineTextAlignment(.leading)
+                            HStack(spacing: 6) {
+                                Text(p.project).font(.claude(10, .semibold)).foregroundColor(T.accent2)
+                                Text("·").font(.claude(10)).foregroundColor(T.subtext)
+                                Text(timeAgo(p.at)).font(.claude(10)).foregroundColor(T.subtext)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if p.id != shown.last?.id {
+                            Rectangle().fill(T.border).frame(height: 1)
+                        }
+                    }
+                    if prompts.count > 8 {
+                        Button { withAnimation { expanded.toggle() } } label: {
+                            Text(expanded ? "Show less" : "Show all \(min(prompts.count, 30))")
+                                .font(.claude(11, .semibold)).foregroundColor(T.accent)
+                        }.padding(.top, 2)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Mirrors the Mac panel's ModeCard: Claude Code's 5 permission modes as live tiles
+// (the active one lights up in its tint) + the effort meter. A readout — the human
+// sets the mode in Claude Code; here we reflect it, the same signal that drives the
+// Mac mascot's animation.
+struct ModeCard: View {
+    let mode: String
+    let effort: String
+    let risk: String?     // pending permission's risk, if one is waiting (overrides the tint)
+
+    private struct Mode { let key, label, icon: String }
+    private let modes: [Mode] = [
+        .init(key: "ask",    label: "Ask",    icon: "hand.raised"),
+        .init(key: "edit",   label: "Edit",   icon: "chevron.left.forwardslash.chevron.right"),
+        .init(key: "plan",   label: "Plan",   icon: "list.bullet.rectangle"),
+        .init(key: "auto",   label: "Auto",   icon: "bolt.fill"),
+        .init(key: "bypass", label: "Bypass", icon: "infinity"),
+    ]
+    private let efforts = ["low", "medium", "high", "ultra"]
+
+    private var tint: Color {
+        if risk == "danger" { return T.red }
+        if risk == "write"  { return T.amber }
+        switch mode {
+        case "bypass": return T.red
+        case "edit":   return T.amber
+        case "auto":   return T.accent
+        default:       return T.accent2   // plan / ask
+        }
+    }
+    private func full(_ k: String) -> String {
+        switch k {
+        case "edit":   return "Edit automatically"
+        case "plan":   return "Plan mode"
+        case "auto":   return "Auto mode"
+        case "bypass": return "Bypass permissions"
+        default:       return "Ask before edits"
+        }
+    }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionLabel(text: "Mode")
+                    Spacer()
+                    Text(full(mode)).font(.claude(11, .semibold)).foregroundColor(tint)
+                }
+                HStack(spacing: 6) {
+                    ForEach(modes, id: \.key) { m in
+                        let on = m.key == mode
+                        VStack(spacing: 4) {
+                            Image(systemName: m.icon).font(.system(size: 14, weight: .semibold))
+                            Text(m.label).font(.claude(9, .semibold))
+                        }
+                        .foregroundColor(on ? T.bg : T.subtext)
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(on ? tint : T.track))
+                        .overlay(RoundedRectangle(cornerRadius: 10)
+                            .stroke(on ? tint : T.border, lineWidth: 1))
+                        .animation(.easeInOut(duration: 0.25), value: on)
+                    }
+                }
+                effortMeter
+            }
+        }
+    }
+
+    private var effortMeter: some View {
+        let lvl = normEffort(effort)
+        let idx = efforts.firstIndex(of: lvl)
+        return HStack(spacing: 8) {
+            Text("Effort").font(.claude(12, .medium)).foregroundColor(T.subtext)
+            HStack(spacing: 4) {
+                ForEach(0..<efforts.count, id: \.self) { i in
+                    Capsule().fill(idx != nil && i <= idx! ? tint : T.track).frame(height: 5)
+                }
+            }
+            Text(idx != nil ? lvl.capitalized : "—")
+                .font(.claude(11, .semibold))
+                .foregroundColor(idx != nil ? tint : T.subtext)
+                .frame(width: 52, alignment: .trailing)
+        }
+    }
+    private func normEffort(_ e: String) -> String {
+        let s = e.lowercased()
+        if s.contains("ultra") || s.contains("max") { return "ultra" }
+        if s.contains("high") { return "high" }
+        if s.contains("med")  { return "medium" }
+        if s.contains("low")  { return "low" }
+        return ""
+    }
+}
 
 struct PlanCard: View {
     let plan: EdgeSnapshot.PlanInfo

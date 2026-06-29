@@ -52,6 +52,8 @@ final class UsageStore: ObservableObject {
 
     // Recent Claude Code chats (sessions), newest first.
     @Published var recentChats: [RecentChat] = []
+    // Recent human-typed prompts across chats, newest first — the phone's Prompt History.
+    @Published var promptHistory: [PromptHistoryEntry] = []
     // sessionID → short summary of its (long) prompt, from the claude CLI.
     @Published var promptSummaries: [String: String] = [:]
     // sessionID → the exact prompt text its cached summary was made for, so a NEW
@@ -197,10 +199,12 @@ final class UsageStore: ObservableObject {
             let s = UsageLoader.computeSummary()
             let sessions = UsageLoader.activeSessions()
             let chats = UsageLoader.recentChats()
+            let history = UsageLoader.promptHistory()
             DispatchQueue.main.async {
                 self.summary = s
                 self.loading = false
                 self.recentChats = chats
+                self.promptHistory = history
                 self.updateChatSummaries(chats)
                 // Only apply the session/ended detection if this is the freshest scan —
                 // otherwise a slow stale scan overwrites a newer one and fires a spurious

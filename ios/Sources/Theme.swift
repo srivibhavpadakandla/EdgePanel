@@ -59,6 +59,16 @@ func fmtTokens(_ t: Int) -> String {
 }
 func prettyModel(_ m: String?) -> String { m ?? "Claude" }
 
+/// Compact relative time: "just now" / "3m ago" / "2h ago" / "5d ago".
+func timeAgo(_ d: Date) -> String {
+    let s = Int(max(0, Date().timeIntervalSince(d)))
+    if s < 5 { return "just now" }
+    if s < 60 { return "\(s)s ago" }
+    if s < 3600 { return "\(s / 60)m ago" }
+    if s < 86400 { return "\(s / 3600)h ago" }
+    return "\(s / 86400)d ago"
+}
+
 // A bordered card container with real elevation (lit-from-above surface).
 struct Card<Content: View>: View {
     @ViewBuilder var content: Content

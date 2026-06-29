@@ -12,6 +12,18 @@ struct EdgeSnapshot: Codable {
     var pending: Pending?
     var question: Question?
     var autoApprove: Bool?           // Autonomous mode on (every permission auto-allowed)
+    var mode: String?                // permission mode: ask | edit | plan | auto | bypass
+    var effort: String?              // reasoning effort: low | medium | high | ultra | "" unknown
+    var mascotAnim: String?          // live mascot posture name (mirrors the Mac creature)
+    var promptHistory: [PromptItem]? // recent human-typed prompts, newest first
+
+    struct PromptItem: Codable, Identifiable {
+        var id: String
+        var text: String
+        var atEpoch: Double
+        var project: String
+        var at: Date { Date(timeIntervalSince1970: atEpoch) }
+    }
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -83,6 +95,8 @@ final class EdgeClient: ObservableObject {
     @Published var snapshot: EdgeSnapshot?
     @Published var connected = false
     @Published var lastError: String?
+    @Published var lastUpdated: Date?   // when /snapshot last succeeded — shown when offline
+    @Published var refreshing = false   // a manual refresh is in flight (spins the button)
 
     @AppStorage("edgepanel.host") var host: String = ""   // set by pairing (QR/manual); empty → show pairing
     @AppStorage("edgepanel.token") var token: String = ""
@@ -101,6 +115,15 @@ final class EdgeClient: ObservableObject {
         }
     }
     func stop() { timer?.invalidate(); timer = nil }
+
+    /// Manual pull-to-refresh / button: fetch a fresh snapshot right now. Keeps whatever
+    /// data we already have on failure (offline → most-recent data stays on screen).
+    func refresh() async {
+        if refreshing { return }
+        refreshing = true
+        await poll()
+        refreshing = false
+    }
 
     /// Approve / deny / always a held permission request on the Mac, then poll
     /// immediately so the card clears without waiting for the next tick.
@@ -246,7 +269,7 @@ final class EdgeClient: ObservableObject {
             if code == 401 { connected = false; lastError = "Wrong token"; return }
             guard code == 200 else { throw URLError(.badServerResponse) }
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
-            snapshot = snap; connected = true; lastError = nil
+            snapshot = snap; connected = true; lastError = nil; lastUpdated = Date()
             // After a connectivity gap (>10s blind), sessions may have finished while we
             // couldn't see them — drop the stale baseline so we re-seed instead of firing a
             // burst of bogus "done" Island flips for sessions that ended minutes ago.

@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startServer() {
         let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_PORT"] ?? ProcessInfo.processInfo.environment["PERCH_PORT"] ?? "") ?? 8787
-        let state = self.state
+        let state = self.state, store = self.store
         let server = HTTPServer(port: port) { request in
             guard request.remoteIsLoopback else {
                 return HTTPResponse(status: 403, headers: [:], body: Data("loopback only".utf8))
@@ -87,6 +87,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             case ("GET", "/health"):
                 return .ok("edgepanel ok")
+            case ("GET", "/debug/snapshot"):
+                // Test-only (EDGEPANEL_DEBUG=1): the panel snapshot over loopback, no token,
+                // so the mode/effort/mascot selector can be verified end-to-end.
+                guard ProcessInfo.processInfo.environment["EDGEPANEL_DEBUG"] == "1" else { return .notFound() }
+                let data = await MainActor.run { () -> Data in
+                    let snap = EdgeSnapshot.build(store: store, state: state)
+                    return (try? JSONEncoder().encode(snap)) ?? Data("{}".utf8)
+                }
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            case ("GET", "/debug/render"):
+                // Test-only (EDGEPANEL_DEBUG=1): render the live panel to a PNG at ?out=,
+                // so the mascot + ModeCard can be eyeballed even with the display asleep.
+                guard ProcessInfo.processInfo.environment["EDGEPANEL_DEBUG"] == "1" else { return .notFound() }
+                let out: String = {
+                    guard let q = request.path.split(separator: "?", maxSplits: 1).dropFirst().first else { return "" }
+                    for pair in q.split(separator: "&") {
+                        let kv = pair.split(separator: "=", maxSplits: 1)
+                        if kv.first == "out", kv.count == 2 {
+                            return String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                        }
+                    }
+                    return ""
+                }()
+                let ok = await MainActor.run { () -> Bool in
+                    let renderer = ImageRenderer(content: ModePreview(state: state))
+                    renderer.scale = 2
+                    guard !out.isEmpty, let img = renderer.nsImage,
+                          let tiff = img.tiffRepresentation,
+                          let rep = NSBitmapImageRep(data: tiff),
+                          let png = rep.representation(using: .png, properties: [:]) else { return false }
+                    return (try? png.write(to: URL(fileURLWithPath: out))) != nil
+                }
+                return ok ? .ok("rendered \(out)") : HTTPResponse(status: 500, headers: [:], body: Data("render failed".utf8))
             case ("POST", "/debug/decide"):
                 // Test-only (EDGEPANEL_DEBUG=1): resolve the current pending request.
                 guard ProcessInfo.processInfo.environment["EDGEPANEL_DEBUG"] == "1" else { return .notFound() }

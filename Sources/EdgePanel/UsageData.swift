@@ -413,6 +413,14 @@ struct RecentChat: Identifiable {
     var needsSummary: Bool { (title?.isEmpty ?? true) && (firstPrompt?.count ?? 0) > PromptSummarizer.threshold }
 }
 
+/// One human-typed prompt, for the phone's Prompt History feed.
+struct PromptHistoryEntry: Identifiable {
+    let id: String        // session id + timestamp, stable across scans
+    let text: String
+    let at: Date
+    let project: String
+}
+
 /// One tool call, for the activity feed. Parsed from a transcript `tool_use`.
 struct ToolEvent: Identifiable, Equatable {
     let id = UUID()
@@ -783,6 +791,61 @@ extension UsageLoader {
             out.append(chat)
         }
         return out
+    }
+
+    /// Recent human-typed prompts across your interactive chats, newest first — the
+    /// phone's Prompt History. Reuses the same interactivity/agent filtering as
+    /// recentChats(); reads each file's tail so the LATEST prompts of long sessions show.
+    static func promptHistory(within: TimeInterval = 3 * 86400, files maxFiles: Int = 14,
+                              limit: Int = 30) -> [PromptHistoryEntry] {
+        let base = projectsBase()
+        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        let now = Date()
+        var recent: [(url: URL, date: Date)] = []
+        while let u = en.nextObject() as? URL {
+            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+            if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
+            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(mod) <= within { recent.append((u, mod)) }
+        }
+        recent.sort { $0.date > $1.date }
+
+        var out: [PromptHistoryEntry] = []
+        for (u, _) in recent.prefix(maxFiles) {
+            // Interactivity + cwd live near the START; the freshest prompts live at the END.
+            guard let fh = try? FileHandle(forReadingFrom: u) else { continue }
+            let head = (try? fh.read(upToCount: 262_144)) ?? Data()
+            try? fh.close()
+            let headText = String(decoding: head, as: UTF8.self)
+            var isInteractive = false, cwd: String?
+            for sub in headText.split(separator: "\n", omittingEmptySubsequences: true) {
+                guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any] else { continue }
+                if let e = o["entrypoint"] as? String, !e.isEmpty, e != "sdk-cli" { isInteractive = true }
+                if cwd == nil, let c = o["cwd"] as? String, !c.isEmpty { cwd = c }
+                if isInteractive && cwd != nil { break }
+            }
+            guard isInteractive else { continue }      // your real chats only
+            let project = cwd.map { ($0 as NSString).lastPathComponent } ?? "chat"
+            let id = u.deletingPathExtension().lastPathComponent
+            let body = tailString(u, maxBytes: 768_000) ?? headText
+            for sub in body.split(separator: "\n", omittingEmptySubsequences: true) {
+                guard let o = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any],
+                      let p = userPromptText(o), !p.hasPrefix("["), !p.hasPrefix("{"),
+                      p.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 else { continue }
+                let date = (o["timestamp"] as? String).flatMap(parseDate) ?? .distantPast
+                out.append(PromptHistoryEntry(id: "\(id)@\(o["timestamp"] as? String ?? "\(out.count)")",
+                                              text: String(p.prefix(300)), at: date, project: project))
+            }
+        }
+        out.sort { $0.at > $1.at }
+        var seen = Set<String>(); var dedup: [PromptHistoryEntry] = []
+        for e in out {
+            let k = e.text.lowercased()
+            if seen.contains(k) { continue }
+            seen.insert(k); dedup.append(e)
+            if dedup.count >= limit { break }
+        }
+        return dedup
     }
 
     /// The genuine human-typed text of a user message, or nil if this isn't one

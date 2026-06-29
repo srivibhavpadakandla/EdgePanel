@@ -14,6 +14,17 @@ struct EdgeSnapshot: Codable {
     var pending: Pending?      // a permission request waiting on you (approve from the phone)
     var question: Question?    // an AskUserQuestion waiting on you (answer from the phone)
     var autoApprove: Bool = false   // Autonomous mode is on (every permission auto-allowed)
+    var mode: String = "ask"        // permission mode: ask | edit | plan | auto | bypass
+    var effort: String = ""         // reasoning effort: low | medium | high | ultra | "" (unknown)
+    var mascotAnim: String = "idle_blink"   // live mascot posture — phone can mirror it
+    var promptHistory: [PromptItem] = []    // recent human-typed prompts, newest first
+
+    struct PromptItem: Codable {
+        var id: String
+        var text: String
+        var atEpoch: Double
+        var project: String
+    }
 
     struct PlanInfo: Codable {
         var fiveHourPct: Double
@@ -126,6 +137,12 @@ struct EdgeSnapshot: Codable {
         return EdgeSnapshot(generatedAt: now.timeIntervalSince1970, plan: plan,
                             spend: Spend(fiveHourUSD: windowSpend),
                             working: working, chats: chats, calendar: calendar,
-                            pending: pending, question: question, autoApprove: state.autoApprove)
+                            pending: pending, question: question, autoApprove: state.autoApprove,
+                            mode: state.normalizedMode, effort: state.normalizedEffort,
+                            mascotAnim: state.mascotAnimName,
+                            promptHistory: store.promptHistory.map {
+                                PromptItem(id: $0.id, text: $0.text,
+                                           atEpoch: $0.at.timeIntervalSince1970, project: $0.project)
+                            })
     }
 }
