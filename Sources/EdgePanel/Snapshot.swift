@@ -54,6 +54,8 @@ struct EdgeSnapshot: Codable {
         var runningAgents: Int = 0
         var queuedPrompts: Int = 0
         var queuedTexts: [String] = []   // the actual queued prompt texts, waiting their turn
+        var modeKey: String = "ask"      // THIS chat's permission mode (ask|edit|plan|auto|bypass)
+        var effortKey: String = ""       // THIS chat's reasoning effort (low|medium|high|xhigh|max|"")
         var isEditor: Bool = false   // editor session you're watching → kept off the Island
     }
     struct Chat: Codable {
@@ -120,7 +122,8 @@ struct EdgeSnapshot: Codable {
                     prompt: sn.promptText, promptSummary: store.promptSummaries[sn.id],
                     promptAtEpoch: sn.promptAt?.timeIntervalSince1970, turnTokens: sn.turnTokens,
                     runningAgents: sn.runningAgents, queuedPrompts: sn.queuedPrompts,
-                    queuedTexts: sn.queuedTexts, isEditor: sn.isEditor)
+                    queuedTexts: sn.queuedTexts, modeKey: sn.modeKey, effortKey: sn.effortKey,
+                    isEditor: sn.isEditor)
         }
         let chats = store.recentChats.map { c in
             Chat(id: c.id, name: c.name(summaries: store.promptSummaries), project: c.project,

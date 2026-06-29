@@ -567,22 +567,81 @@ struct WorkingCard: View {
                     Text("nothing running — waiting on your next prompt")
                         .font(.claude(12)).foregroundColor(T.subtext)
                 } else {
-                    ForEach(working) { w in
-                        NavigationLink {
-                            ChatThreadView(sessionId: w.id, project: w.project, cwd: w.cwd)
-                        } label: {
-                            WorkingRow(w: w)
-                                .padding(12)
-                                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(T.green.opacity(0.06)))
-                                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(T.green.opacity(0.16), lineWidth: 1))
-                        }.buttonStyle(.plain)
-                        .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
-                                                removal: .opacity))
+                    // Group running chats by their (mode, effort) setting — chats on the same
+                    // setting share one category header; each header carries its mode + effort.
+                    ForEach(groups, id: \.key) { g in
+                        SettingHeader(mode: g.mode, effort: g.effort, count: g.sessions.count)
+                            .padding(.top, 2)
+                        ForEach(g.sessions) { w in
+                            NavigationLink {
+                                ChatThreadView(sessionId: w.id, project: w.project, cwd: w.cwd)
+                            } label: {
+                                WorkingRow(w: w)
+                                    .padding(12)
+                                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(T.green.opacity(0.06)))
+                                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(T.green.opacity(0.16), lineWidth: 1))
+                            }.buttonStyle(.plain)
+                            .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
+                                                    removal: .opacity))
+                        }
                     }
                 }
             }
         }
         .animation(.smooth(duration: 0.38), value: working.count)
+    }
+
+    /// Running chats grouped by (mode, effort), in first-seen order.
+    private var groups: [(key: String, mode: String, effort: String, sessions: [EdgeSnapshot.Working])] {
+        var order: [String] = []
+        var map: [String: [EdgeSnapshot.Working]] = [:]
+        for w in working {
+            let k = "\(w.modeKey)|\(w.effortKey)"
+            if map[k] == nil { order.append(k) }
+            map[k, default: []].append(w)
+        }
+        return order.map { k in
+            let p = k.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            return (k, String(p[0]), p.count > 1 ? String(p[1]) : "", map[k] ?? [])
+        }
+    }
+}
+
+/// A category header for a (mode, effort) group in WORKING NOW — a tinted mode chip + a
+/// 5-segment effort meter + count, matching the ModeCard styling.
+struct SettingHeader: View {
+    let mode: String, effort: String, count: Int
+    private let efforts = ["low", "medium", "high", "xhigh", "max"]
+    private var modeColor: Color {
+        switch mode { case "bypass": return T.red; case "edit": return T.amber; case "auto": return T.accent; default: return T.accent2 }
+    }
+    private var modeLabel: String {
+        switch mode { case "bypass": return "Bypass"; case "edit": return "Edit"; case "plan": return "Plan"; case "auto": return "Auto"; default: return "Ask" }
+    }
+    private var effortLabel: String {
+        switch effort { case "low": return "Low"; case "medium": return "Medium"; case "high": return "High"; case "xhigh": return "X-High"; case "max": return "Max"; default: return "" }
+    }
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(modeLabel).font(.claude(10, .bold))
+                .foregroundColor(modeColor)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(modeColor.opacity(0.16)))
+            if let idx = efforts.firstIndex(of: effort) {
+                HStack(spacing: 3) {
+                    ForEach(0..<efforts.count, id: \.self) { i in
+                        Capsule().fill(i <= idx ? modeColor : T.track).frame(width: 8, height: 4)
+                    }
+                }
+                Text(effortLabel).font(.claude(10, .semibold)).foregroundColor(T.subtext)
+            }
+            Spacer(minLength: 4)
+            if count > 1 {
+                Text("\(count)").font(.claude(10, .bold)).foregroundColor(T.subtext)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(T.track))
+            }
+        }
     }
 }
 
