@@ -592,7 +592,6 @@ private struct EditorHeroCard: View {
     let mode: String
     let busy: Bool
     let lastPrompt: String?
-    @State private var pulse = false
 
     private var modeLabel: String {
         switch mode { case "bypass": return "Bypass"; case "edit": return "Edit"; case "plan": return "Plan"
@@ -605,12 +604,7 @@ private struct EditorHeroCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 9) {
-                ZStack {
-                    Circle().fill(T.green.opacity(0.30)).frame(width: 18, height: 18)
-                        .scaleEffect(pulse ? 1.7 : 0.8).opacity(pulse ? 0 : 0.9)
-                    Circle().fill(T.green).frame(width: 8, height: 8)
-                }
-                .frame(width: 18, height: 18)
+                PulsingDot()
                 Text("YOUR EDITOR").font(.claude(10, .semibold)).tracking(1.0).foregroundColor(T.green)
                 Spacer()
                 Text(modeLabel).font(.claude(10, .semibold)).foregroundColor(modeColor)
@@ -653,7 +647,6 @@ private struct EditorHeroCard: View {
             }
         )
         .shadow(color: T.accent.opacity(0.18), radius: 16, x: 0, y: 6)
-        .onAppear { withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true } }
     }
 }
 

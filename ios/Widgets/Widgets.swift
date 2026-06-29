@@ -99,27 +99,23 @@ struct WorkingLiveActivity: Widget {
     }
 }
 
-/// Bird icon with a small count badge when more than one prompt is running.
+/// Bird icon with the running-count shown INLINE beside it (when >1). The count sits to the
+/// right, in-bounds — an offset corner badge gets clipped by the compact Island's rounded edge.
 private struct BirdBadge: View {
     let state: WorkingAttributes.ContentState
-    var minimal: Bool = false   // the minimal slot is a tiny circle → glyph only, no count badge
+    var minimal: Bool = false   // the minimal slot is a tiny circle → glyph only, no count
     var body: some View {
-        // Fixed-size glyph + the count as an OVERLAY (doesn't expand layout bounds), so
-        // the compact Dynamic Island slot sizes to the bird and never clips it. The old
-        // ZStack + .offset badge widened the bounds past the slot → the bird got cut off.
-        Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
-            .font(.system(size: 16))
-            .foregroundColor(state.done ? olive : clay)
-            .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
-            .overlay(alignment: .topTrailing) {
-                if !minimal && !state.done && state.count > 1 {
-                    Text(state.count > 9 ? "9+" : "\(state.count)")
-                        .font(.system(size: 8, weight: .bold)).foregroundColor(.black)
-                        .padding(.horizontal, 2).frame(minHeight: 11)
-                        .background(Capsule().fill(olive))
-                        .offset(x: 4, y: -3)
-                }
+        HStack(spacing: 2) {
+            Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
+                .font(.system(size: minimal ? 15 : 16))
+                .foregroundColor(state.done ? olive : clay)
+                .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
+            if !minimal && !state.done && state.count > 1 {
+                Text(state.count > 9 ? "9+" : "\(state.count)")
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(olive)
+                    .monospacedDigit()
             }
+        }
     }
 }
 

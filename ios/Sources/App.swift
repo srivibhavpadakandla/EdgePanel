@@ -615,19 +615,18 @@ struct WorkingRow: View {
     }
 }
 
-/// A live "radar ping" dot — solid core + an expanding, fading ring.
+/// A calm "breathing" live dot — a solid core whose soft glow gently swells and fades.
+/// (Replaces the old expanding radar-ping, which read as harsh.)
 struct PulsingDot: View {
     var color: Color = T.green
-    @State private var animate = false
+    @State private var on = false
     var body: some View {
-        ZStack {
-            Circle().fill(color.opacity(0.4)).frame(width: 9, height: 9)
-                .scaleEffect(animate ? 2.6 : 1).opacity(animate ? 0 : 0.7)
-            Circle().fill(color).frame(width: 9, height: 9)
-        }
-        .frame(width: 9, height: 9)
-        .animation(.easeOut(duration: 1.5).repeatForever(autoreverses: false), value: animate)
-        .onAppear { animate = true }
+        Circle().fill(color).frame(width: 8, height: 8)
+            .shadow(color: color.opacity(on ? 0.85 : 0.25), radius: on ? 5 : 1.5)
+            .opacity(on ? 1 : 0.62)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.7).repeatForever(autoreverses: true)) { on = true }
+            }
     }
 }
 
