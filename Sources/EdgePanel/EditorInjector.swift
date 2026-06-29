@@ -10,6 +10,7 @@
 // inconsistently, but honors the Accessibility path reliably. cliclick is the fallback.
 
 import AppKit
+import ApplicationServices   // Accessibility (AXUIElement) — verify focus landed on a text input
 
 final class EditorInjector: @unchecked Sendable {
     static let shared = EditorInjector()
@@ -63,24 +64,28 @@ final class EditorInjector: @unchecked Sendable {
             return prior ?? ""        // "" sentinel = editor found (nil only when none)
         }
         guard saved != nil else { return false }
-        usleep(650_000)                                  // let the editor come forward
-
-        // Paste the text EXACTLY ONCE (focus the chat input + Cmd+V). Re-pasting on each retry
-        // appended it into the same input — "Hello" became "HelloHelloHello". After this the
-        // draft holds the text; retries below only re-SUBMIT (press Return), never re-paste.
-        focusAndPaste()
+        // Activation is ASYNC — wait until the editor is really frontmost before any keystroke.
+        // A fixed sleep raced slow app switches and dropped the paste/Return into the wrong app
+        // (a big source of "glitchy"). Then focus the chat input, paste ONCE, submit.
+        waitFrontmost(timeout: 1.8)
+        focusChatInput()
+        pasteOnce()
+        submitReturn()
 
         var landed = false
-        for _ in 0..<6 {
+        for _ in 0..<7 {
             // Verify: the typed prompt appears in the transcript (submitted = a user record,
             // queued mid-turn = a queued_command attachment — both count).
-            let deadline = Date().addingTimeInterval(1.6)
+            let deadline = Date().addingTimeInterval(1.5)
             while Date() < deadline {
-                usleep(350_000)
+                usleep(330_000)
                 if UsageLoader.typedPromptLanded(sessionId: sessionId, cwd: cwd, needle: needle) { landed = true; break }
             }
             if landed { break }
-            submitReturn()   // re-submit the SAME draft (no re-paste → no accumulation)
+            // The draft is likely sitting in the input unsubmitted → re-submit (NO re-paste, so
+            // it can't accumulate). Re-activate first in case another app stole focus.
+            ensureFrontmost()
+            submitReturn()
         }
 
         // Restore the user's clipboard once we're done — but only if our text is still there
@@ -93,30 +98,94 @@ final class EditorInjector: @unchecked Sendable {
         return landed
     }
 
-    /// Focus the Claude Code chat input (Cmd+Esc) and paste — ONCE. PRIMARY: System Events
-    /// (Accessibility), which Electron/Chromium honors far more reliably than raw CGEvents.
-    private func focusAndPaste() {
-        let ok = runOsascript("""
-        tell application "System Events"
-          key code 53 using command down
-          delay 0.45
-          keystroke "v" using command down
-          delay 0.35
-          key code 36
-        end tell
-        """, timeout: 6)
-        if !ok, let cli = Self.cliclick {
-            run(cli, ["kd:cmd", "kp:esc", "ku:cmd"]); usleep(500_000)
-            run(cli, ["kd:cmd", "t:v", "ku:cmd"]); usleep(700_000)
-            run(cli, ["kp:return"])
+    // MARK: - keystroke steps
+
+    /// Focus the Claude Code chat input (Cmd+Esc). When Accessibility is granted, VERIFY a text
+    /// field actually took focus — the extension's Cmd+Esc is a TOGGLE, so if it blurred (or
+    /// landed on a button/tree) we issue it once more to land on the input.
+    private func focusChatInput() {
+        let ok = runOsascript("tell application \"System Events\" to key code 53 using command down", timeout: 5)
+        if !ok, let cli = Self.cliclick { run(cli, ["kd:cmd", "kp:esc", "ku:cmd"]) }
+        usleep(480_000)
+        if AXIsProcessTrusted(), let el = focusedAXElement(), !isTextLike(el) {
+            _ = runOsascript("tell application \"System Events\" to key code 53 using command down", timeout: 5)
+            usleep(480_000)
         }
     }
-
-    /// Press Return to submit/queue whatever is already in the focused input — used to RETRY
-    /// the submit without pasting again (the first focusAndPaste already put the text there).
+    /// Paste the clipboard — exactly once (callers never call this twice → no accumulation).
+    private func pasteOnce() {
+        let ok = runOsascript("tell application \"System Events\" to keystroke \"v\" using command down", timeout: 5)
+        if !ok, let cli = Self.cliclick { run(cli, ["kd:cmd", "t:v", "ku:cmd"]) }
+        usleep(380_000)
+    }
+    /// Press Return to submit/queue whatever is already in the focused input — re-submitting on
+    /// retry without pasting again (the first pasteOnce already put the text there).
     private func submitReturn() {
         let ok = runOsascript("tell application \"System Events\" to key code 36", timeout: 4)
         if !ok, let cli = Self.cliclick { run(cli, ["kp:return"]) }
+    }
+
+    /// SAFE diagnostic (no paste, no submit): activate the editor, focus the chat input, and
+    /// report what Accessibility sees — so we can validate the focus mechanism without typing
+    /// anything into the real conversation. Returns role/value-length/placeholder of the focus.
+    func probeFocus() -> [String: String] {
+        let found = onMain { () -> Bool in
+            guard let app = self.runningEditor() else { return false }
+            app.activate(options: [.activateIgnoringOtherApps]); return true
+        }
+        guard found else { return ["editor": "none-running"] }
+        waitFrontmost(timeout: 1.8)
+        focusChatInput()
+        var out: [String: String] = ["editor": "found", "axTrusted": AXIsProcessTrusted() ? "yes" : "no"]
+        if let el = focusedAXElement() {
+            var r: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r)
+            out["focusedRole"] = (r as? String) ?? "?"
+            var v: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v)
+            out["valueLen"] = "\((v as? String)?.count ?? -1)"
+            var pl: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXPlaceholderValueAttribute as CFString, &pl)
+            out["placeholder"] = (pl as? String) ?? ""
+        } else {
+            out["focusedRole"] = "none-or-AX-unavailable"
+        }
+        return out
+    }
+
+    // MARK: - frontmost + accessibility helpers
+
+    /// Block until the target editor is the frontmost app (activation is async), up to `timeout`,
+    /// then a small settle — so keystrokes can't fire into the previously-frontmost app.
+    private func waitFrontmost(timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let up = onMain { () -> Bool in
+                guard let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
+                return self.editorBundles.contains(id)
+            }
+            if up { usleep(250_000); return }
+            usleep(120_000)
+        }
+        usleep(300_000)   // best effort even if we couldn't confirm
+    }
+    /// Re-activate the editor (used before a re-submit, in case another app stole focus).
+    private func ensureFrontmost() {
+        _ = onMain { self.runningEditor()?.activate(options: [.activateIgnoringOtherApps]) ?? false }
+        usleep(250_000)
+    }
+
+    /// The system-wide focused UI element (nil if Accessibility isn't granted or none focused).
+    private func focusedAXElement() -> AXUIElement? {
+        let sys = AXUIElementCreateSystemWide()
+        var f: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &f) == .success,
+              let el = f, CFGetTypeID(el) == AXUIElementGetTypeID() else { return nil }
+        return (el as! AXUIElement)
+    }
+    /// True if `el` is a text-entry control (or its role is unknown → don't block on uncertainty).
+    private func isTextLike(_ el: AXUIElement) -> Bool {
+        var r: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r) == .success,
+              let role = r as? String else { return true }
+        return role == (kAXTextAreaRole as String) || role == (kAXTextFieldRole as String) || role == "AXComboBox"
     }
 
     /// Interrupt the running turn in the live editor session (Escape stops generation).

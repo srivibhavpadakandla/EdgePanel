@@ -89,6 +89,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             case ("GET", "/health"):
                 return .ok("edgepanel ok")
+            case ("GET", "/debug/inject-probe"):
+                // Test-only (EDGEPANEL_DEBUG=1): focus the editor chat input + report what
+                // Accessibility sees — validates the focus path WITHOUT typing into the chat.
+                guard ProcessInfo.processInfo.environment["EDGEPANEL_DEBUG"] == "1" else { return .notFound() }
+                let info = EditorInjector.shared.probeFocus()
+                let data = (try? JSONSerialization.data(withJSONObject: info)) ?? Data("{}".utf8)
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             case ("GET", "/debug/snapshot"):
                 // Test-only (EDGEPANEL_DEBUG=1): the panel snapshot over loopback, no token,
                 // so the mode/effort/mascot selector can be verified end-to-end.
