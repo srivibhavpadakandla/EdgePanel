@@ -229,7 +229,7 @@ struct PlanCard: View {
 struct QuestionCard: View {
     @EnvironmentObject var client: EdgeClient
     let q: EdgeSnapshot.Question
-    @State private var sel: [Int: Set<String>] = [:]   // item INDEX → chosen labels (text isn't unique across items)
+    @State private var sel: [Int: Set<Int>] = [:]   // item INDEX → chosen option INDEXES (labels aren't unique either)
 
     var body: some View {
         Card {
@@ -246,13 +246,13 @@ struct QuestionCard: View {
                         if item.multiSelect {
                             Text("pick one or more").font(.claude(10)).foregroundColor(T.subtext)
                         }
-                        ForEach(item.options, id: \.label) { opt in
-                            Button { toggle(idx, item, opt.label) } label: {
+                        ForEach(Array(item.options.enumerated()), id: \.offset) { oi, opt in
+                            Button { toggle(idx, item, oi) } label: {
                                 HStack(spacing: 9) {
-                                    Image(systemName: isSel(idx, opt.label)
+                                    Image(systemName: isSel(idx, oi)
                                           ? (item.multiSelect ? "checkmark.square.fill" : "checkmark.circle.fill")
                                           : (item.multiSelect ? "square" : "circle"))
-                                        .foregroundColor(isSel(idx, opt.label) ? T.accent : T.subtext)
+                                        .foregroundColor(isSel(idx, oi) ? T.accent : T.subtext)
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(opt.label).font(.claude(13, .medium)).foregroundColor(T.text)
                                         if let d = opt.description, !d.isEmpty {
@@ -263,7 +263,7 @@ struct QuestionCard: View {
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(RoundedRectangle(cornerRadius: 9)
-                                    .fill(isSel(idx, opt.label) ? T.accent.opacity(0.16) : T.track.opacity(0.5)))
+                                    .fill(isSel(idx, oi) ? T.accent.opacity(0.16) : T.track.opacity(0.5)))
                             }.buttonStyle(.plain)
                         }
                     }
@@ -279,20 +279,21 @@ struct QuestionCard: View {
     }
 
     private var answered: Bool { q.items.indices.allSatisfy { !(sel[$0] ?? []).isEmpty } }
-    private func isSel(_ idx: Int, _ label: String) -> Bool { (sel[idx] ?? []).contains(label) }
-    private func toggle(_ idx: Int, _ item: EdgeSnapshot.Question.Item, _ label: String) {
+    private func isSel(_ idx: Int, _ oi: Int) -> Bool { (sel[idx] ?? []).contains(oi) }
+    private func toggle(_ idx: Int, _ item: EdgeSnapshot.Question.Item, _ oi: Int) {
         var s = sel[idx] ?? []
-        if item.multiSelect { if s.contains(label) { s.remove(label) } else { s.insert(label) } }
-        else { s = [label] }
+        if item.multiSelect { if s.contains(oi) { s.remove(oi) } else { s.insert(oi) } }
+        else { s = [oi] }
         sel[idx] = s
     }
     private func submit() {
-        // Internal selection is by index, but the wire answers map stays keyed by question text
-        // (the hook contract). Last-writer-wins if two items share text — unavoidable on the wire,
-        // but the on-screen selection is now per-item-correct.
+        // Selection is by (item index, option index) — labels can repeat — but the wire answers
+        // map stays keyed by question text (the hook contract). Chosen labels come from the
+        // selected option indexes, preserving the questions' option order.
         var answers: [String: String] = [:]
         for (idx, item) in q.items.enumerated() {
-            let chosen = item.options.map { $0.label }.filter { (sel[idx] ?? []).contains($0) }
+            let picks = sel[idx] ?? []
+            let chosen = item.options.enumerated().filter { picks.contains($0.offset) }.map { $0.element.label }
             answers[item.question] = chosen.joined(separator: ",")
         }
         client.answerQuestion(id: q.id, answers: answers)

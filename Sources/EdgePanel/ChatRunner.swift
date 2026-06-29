@@ -81,10 +81,19 @@ final class ChatRunner: @unchecked Sendable {
             // Hard cap the turn; terminating EOFs the pipe so the read loop below exits. Also
             // close the stdout READ FD so a leaked tool child that inherited the write end (and
             // exited claude already, so p.isRunning is false) can't pin the read loop forever.
-            // We close the raw fd (not FileHandle.close()) and read via POSIX read() below, so a
-            // close racing a blocked read returns -1/EBADF — NOT an uncatchable ObjC exception.
-            let outFD = out.fileHandleForReading.fileDescriptor
-            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; close(outFD) }
+            // We read via POSIX read() so a close racing a blocked read returns -1/EBADF (not an
+            // uncatchable ObjC exception). Use OUR OWN dup'd descriptor so the Pipe's FileHandle
+            // still independently closes the original on dealloc — closing different descriptors
+            // avoids a double-close (and the fd-reuse hazard of closing a number twice). A
+            // close-once guard keeps the watchdog and the normal post-loop cleanup from both
+            // closing the dup.
+            let outFD = dup(out.fileHandleForReading.fileDescriptor)
+            let closeLock = NSLock(); var outClosed = false
+            func closeOutOnce() {
+                closeLock.lock(); let already = outClosed; outClosed = true; closeLock.unlock()
+                if !already, outFD >= 0 { close(outFD) }
+            }
+            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; closeOutOnce() }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
             // Drain stderr concurrently (surfaces a real failure reason on the phone).
             var errData = Data(); let errSem = DispatchSemaphore(value: 0)
@@ -134,6 +143,7 @@ final class ChatRunner: @unchecked Sendable {
             if !buffer.isEmpty { handleLine(buffer) }
             p.waitUntilExit()
             watchdog.cancel()
+            closeOutOnce()   // reclaim our dup'd stdout fd in the normal path (watchdog may not have fired)
             // Only read errData once the reader has finished (avoid racing it). If it's
             // still blocked in readDataToEndOfFile because an orphaned tool child inherited
             // the stderr write-end, CLOSE the read handle so the reader thread unblocks and

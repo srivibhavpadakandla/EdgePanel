@@ -185,21 +185,23 @@ final class ChatStore: ObservableObject {
         let deadline = Date().addingTimeInterval(15 * 60)         // generous hard cap
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            if stopping.contains(threadId) { stopping.remove(threadId); return }   // user hit Stop → settled
+            // user hit Stop → SELF-settle (don't trust stop() to have done it: a Stop during
+            // send()'s pre-stream await cleared busy then send() re-set busyJob, so this loop
+            // must clear them or the thread leaks a "busy" job that nothing settles).
+            if stopping.contains(threadId) { stopping.remove(threadId); settleStopped(threadId, streamToken); return }
             guard let job = await EdgeClient.shared.pollChat(jobId) else {
                 netFails += 1
                 if netFails == 6 { setReconnecting(threadId, true) }   // ~3s offline → show "reconnecting"
                 if netFails >= 40 {                                    // ~20s offline → try the transcript
-                    if await recoverFromTranscript(threadId) { return }
+                    if await recoverFromTranscript(threadId, streamToken) { return }
                     netFails = 6                                       // still running → keep trying, stay reconnecting
                 }
                 continue
             }
-            // Stop landed DURING this poll await → settle, don't resurrect the reply onto a
-            // thread the user already stopped.
-            if stopping.contains(threadId) { stopping.remove(threadId); return }
+            // Stop landed DURING this poll await → self-settle, don't resurrect the reply.
+            if stopping.contains(threadId) { stopping.remove(threadId); settleStopped(threadId, streamToken); return }
             // A Stop-then-Retry reassigned this thread's slot to a newer stream → this loop is
-            // stale; exit without touching the new loop's stop flag.
+            // stale; exit without touching the new loop's state.
             if activeStreams[threadId] != streamToken { return }
             if netFails > 0 { netFails = 0; setReconnecting(threadId, false) }
             if let sid = job.sessionId, !sid.isEmpty { adopt(threadId, sessionId: sid) }
@@ -209,14 +211,14 @@ final class ChatStore: ObservableObject {
             case "done":
                 finalize(threadId, streamId, job.result ?? "(no reply)", .assistant); return
             case "gone":   // Mac restarted / job evicted → the finished reply lives in the transcript
-                if await recoverFromTranscript(threadId) { return }
+                if await recoverFromTranscript(threadId, streamToken) { return }
                 finalize(threadId, streamId, "Lost track of this turn on your Mac — it may still be running. Pull to refresh.", .error); return
             case "error":
                 finalize(threadId, streamId, job.error ?? "Something went wrong.", .error); return
             default: break
             }
         }
-        if await recoverFromTranscript(threadId) { return }
+        if await recoverFromTranscript(threadId, streamToken) { return }
         // Don't clobber visible streamed text with the timeout error — if the bubble already
         // holds a real partial answer, keep it and append a separate marker (as stop() does);
         // only reuse the bubble if it's empty.
@@ -228,10 +230,22 @@ final class ChatStore: ObservableObject {
 
     /// Recover a turn's reply from the session transcript when the live stream couldn't deliver.
     /// Returns true if the turn is finished there (transcript ends with an assistant reply).
+    /// Settle a thread that the user stopped: clear busy/job/reconnecting (and our slot if we
+    /// still own it). Needed because a Stop during send()'s pre-stream await clears busy, then
+    /// send() re-sets busyJob, so the bailing stream must clear it again.
+    private func settleStopped(_ threadId: String, _ streamToken: UUID) {
+        busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId)
+        if activeStreams[threadId] == streamToken { activeStreams[threadId] = nil }
+        save()
+    }
+
     @discardableResult
-    private func recoverFromTranscript(_ threadId: String) async -> Bool {
+    private func recoverFromTranscript(_ threadId: String, _ streamToken: UUID) async -> Bool {
         guard let t = thread(threadId), let resume = t.resumeId else { return false }
         let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
+        // A Stop-then-Retry (or any takeover) reassigned this thread to a newer stream during the
+        // fetch await → don't clobber the new turn with this stale loop's recovered history.
+        guard activeStreams[threadId] == streamToken else { return true }
         guard hist.last?.role == "assistant",                      // turn finished iff it ends with a reply
               let i = threads.firstIndex(where: { $0.id == threadId }) else { return false }
         // Don't clobber a longer local thread, and only treat THIS turn as finished if the
@@ -866,7 +880,8 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
     while i < lines.count {
         let line = trimmed(i)
         // GitHub table: a `| … |` header immediately followed by a `|---|---|` delimiter row.
-        if line.contains("|"), i + 1 < lines.count, isTableDelimiter(trimmed(i + 1)) {
+        if line.contains("|"), i + 1 < lines.count, isTableDelimiter(trimmed(i + 1)),
+           !tableCells(line).isEmpty {   // a bare "|" / "||" header → no columns → don't emit a 0-column Grid
             let headers = tableCells(line)
             i += 2
             var rows: [[String]] = []

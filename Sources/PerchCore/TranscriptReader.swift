@@ -68,12 +68,15 @@ public enum TranscriptReader {
         }
         guard !byRequest.isEmpty else { return nil }
 
+        // Saturating add: intValue clamps a huge/non-finite token to Int.max, so a plain `+`
+        // could overflow-trap when summing across requests.
+        func sat(_ a: Int, _ b: Int) -> Int { let (s, o) = a.addingReportingOverflow(b); return o ? Int.max : s }
         return byRequest.values.reduce(.zero) { acc, u in
             PromptUsage(
-                inputTokens: acc.inputTokens + u.inputTokens,
-                outputTokens: acc.outputTokens + u.outputTokens,
-                cacheCreation: acc.cacheCreation + u.cacheCreation,
-                cacheRead: acc.cacheRead + u.cacheRead
+                inputTokens: sat(acc.inputTokens, u.inputTokens),
+                outputTokens: sat(acc.outputTokens, u.outputTokens),
+                cacheCreation: sat(acc.cacheCreation, u.cacheCreation),
+                cacheRead: sat(acc.cacheRead, u.cacheRead)
             )
         }
     }

@@ -75,14 +75,30 @@ public enum RiskEngine {
     }
 
     /// First quoted payload (for `bash -c "…"` → assess the inner command).
+    /// First quoted payload BY POSITION (not by quote-char precedence) — so a decoy
+    /// double-quoted token AFTER a single-quoted `-c` payload can't mask it.
     private static func quotedPayload(_ raw: String) -> String? {
-        for q: Character in ["\"", "'"] {
-            if let s = raw.firstIndex(of: q),
-               let e = raw[raw.index(after: s)...].firstIndex(of: q) {
-                return String(raw[raw.index(after: s)..<e])
-            }
+        let opens: [(Character, String.Index)] = ["\"", "'"].compactMap { (q: Character) in
+            raw.firstIndex(of: q).map { (q, $0) }
         }
-        return nil
+        guard let (q, s) = opens.min(by: { $0.1 < $1.1 }),
+              let e = raw[raw.index(after: s)...].firstIndex(of: q) else { return nil }
+        return String(raw[raw.index(after: s)..<e])
+    }
+
+    /// EVERY quoted span in a string (defense-in-depth: assess them all, take the most
+    /// severe, so no ordering trick can hide the real `-c` payload behind a decoy).
+    private static func quotedPayloads(_ raw: String) -> [String] {
+        var out: [String] = []
+        var i = raw.startIndex
+        while i < raw.endIndex {
+            let c = raw[i]
+            if c == "\"" || c == "'", let e = raw[raw.index(after: i)...].firstIndex(of: c) {
+                out.append(String(raw[raw.index(after: i)..<e]))
+                i = raw.index(after: e)
+            } else { i = raw.index(after: i) }
+        }
+        return out
     }
 
     /// Split into top-level statements (`;`, `&&`, `||`, `&`, newline) and return the
@@ -147,16 +163,23 @@ public enum RiskEngine {
         if leaders.contains("launchctl"), cmd.range(of: #"\b(load|bootstrap|enable|submit)\b"#, options: .regularExpression) != nil {
             return red("loads a launch agent", always: true)
         }
-        // Shell -c "<payload>": assess the wrapped command itself.
+        // Shell -c "<payload>": assess the wrapped command itself. Assess EVERY quoted span
+        // (not just the first) and take the MOST severe, so a decoy quote can't mask the real
+        // payload (e.g. `bash -c 'rm -rf ~' "ok"` must not be judged by "ok").
         if depth < 3, !leaders.isDisjoint(with: ["bash", "sh", "zsh", "dash", "ksh"]),
-           cmd.range(of: #"\s-c\b"#, options: .regularExpression) != nil,
-           let payload = quotedPayload(raw) {
-            return assessCommand(payload, depth: depth + 1)
+           cmd.range(of: #"\s-c\b"#, options: .regularExpression) != nil {
+            let spans = quotedPayloads(raw)
+            if !spans.isEmpty {
+                let assessed = spans.map { assessCommand($0, depth: depth + 1) }
+                return assessed.max { a, b in a.level.rank != b.level.rank ? a.level.rank < b.level.rank
+                                                                           : (!a.alwaysDangerous && b.alwaysDangerous) }
+                    ?? assessed[0]
+            }
         }
         // rm — depends on recursion + target breadth.
         if leaders.contains("rm") {
             let recursive = cmd.range(of: #"\brm\b[^;&|]*\s-\w*[rf]"#, options: .regularExpression) != nil
-            let broadTarget = cmd.contains(" / ") || cmd.hasSuffix(" /") || cmd.contains(" ~") || cmd.contains("/*") || cmd.contains("$home")
+            let broadTarget = cmd.contains(" / ") || cmd.hasSuffix(" /") || cmd.contains(" ~") || cmd.contains("/*") || cmd.contains("$home") || cmd.contains("${home")
             if recursive && broadTarget { return red("recursive delete of a broad path", always: true) }
             if recursive { return red("recursive delete", always: true) }
             return amber("deletes a file")
@@ -288,7 +311,7 @@ public enum RiskEngine {
                     "/.zshenv", "/.bashrc", "/.bash_profile", "/.profile",
                     "/library/launchagents", "/library/launchdaemons"]
         func hit(_ rel: String) -> Bool {
-            for base in ["~" + rel, "$home" + rel, home + rel] {
+            for base in ["~" + rel, "$home" + rel, "${home}" + rel, home + rel] {
                 guard let r = cmd.range(of: base) else { continue }
                 let after = cmd[r.upperBound...].first
                 if after == nil || after == "/" || after == "." || after == " " || after == "\"" || after == "'" { return true }

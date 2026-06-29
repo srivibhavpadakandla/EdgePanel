@@ -116,8 +116,11 @@ func prettyModel(_ m: String) -> String {
     let fam = l.contains("opus") ? "Opus"
             : l.contains("sonnet") ? "Sonnet"
             : l.contains("haiku") ? "Haiku" : "Claude"
-    if let r = m.range(of: #"\d+([.-]\d+)?"#, options: .regularExpression) {
-        let v = m[r].replacingOccurrences(of: "-", with: ".")
+    // Strip a trailing date/snapshot suffix (e.g. "-20250514") first, so "claude-opus-4-20250514"
+    // reads "Opus 4", not "Opus 4.20250514". Then parse the version (4 / 4-8 → 4.8).
+    let base = m.range(of: #"-\d{6,}$"#, options: .regularExpression).map { String(m[m.startIndex..<$0.lowerBound]) } ?? m
+    if let r = base.range(of: #"\d+([.-]\d+)?"#, options: .regularExpression) {
+        let v = base[r].replacingOccurrences(of: "-", with: ".")
         return "\(fam) \(v)"
     }
     return fam
@@ -512,7 +515,10 @@ extension UsageLoader {
                     byReq[rid] = (inT, outT)
                 }
             }
-            let turnTokens = byReq.values.reduce(0) { $0 + $1.inT + $1.outT }
+            // Saturating sum: intVal already clamps a huge/non-finite token value to Int.max,
+            // so a plain `+` could overflow-trap. addingReportingOverflow → Int.max instead.
+            func sat(_ a: Int, _ b: Int) -> Int { let (s, o) = a.addingReportingOverflow(b); return o ? Int.max : s }
+            let turnTokens = byReq.values.reduce(0) { sat($0, sat($1.inT, $1.outT)) }
 
             // The turn is finished when a completed assistant message (stop_reason
             // end_turn / stop_sequence / max_tokens) exists AFTER your last prompt.
