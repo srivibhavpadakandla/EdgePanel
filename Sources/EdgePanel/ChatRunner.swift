@@ -24,6 +24,7 @@ final class ChatRunner: @unchecked Sendable {
     private var procs: [String: Process] = [:]   // running process per job, so it can be stopped
     private var jobSession: [String: String] = [:]   // jobId → resume sessionId (to release the in-flight lock)
     private var resuming: Set<String> = []           // sessionIds with a turn in flight (guard --resume races)
+    private var cancelIntent: Set<String> = []       // jobs asked to cancel before their process was tracked
     private let lock = NSLock()
     private var counter = 0
     private let maxRuntime: TimeInterval = 600   // 10 min hard cap per turn
@@ -72,9 +73,17 @@ final class ChatRunner: @unchecked Sendable {
             do { try p.run() } catch {
                 self.finish(jid, Job(status: "error", error: "couldn't launch claude: \(error.localizedDescription)")); return
             }
-            self.lock.lock(); self.procs[jid] = p; self.lock.unlock()   // track for /chat/cancel
-            // Hard cap the turn; terminating EOFs the pipe so the read loop below exits.
-            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            // Track for /chat/cancel; if a cancel arrived during the launch window, honor it now.
+            self.lock.lock(); self.procs[jid] = p
+            let cancelNow = self.cancelIntent.remove(jid) != nil
+            self.lock.unlock()
+            if cancelNow { p.terminate() }
+            // Hard cap the turn; terminating EOFs the pipe so the read loop below exits. Also
+            // close the stdout read end so a leaked tool child that inherited the write end (and
+            // exited claude already, so p.isRunning is false) can't pin the read loop forever —
+            // closing forces availableData to return empty, the loop breaks, finish() runs and
+            // releases the per-session in-flight lock instead of wedging the session.
+            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; try? out.fileHandleForReading.close() }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
             // Drain stderr concurrently (surfaces a real failure reason on the phone).
             var errData = Data(); let errSem = DispatchSemaphore(value: 0)
@@ -153,8 +162,13 @@ final class ChatRunner: @unchecked Sendable {
     /// the read loop finishes and reports whatever streamed so far + a "stopped" note.
     @discardableResult
     func cancel(_ jid: String) -> Bool {
-        lock.lock(); let p = procs[jid]; let running = jobs[jid]?.status == "running"; lock.unlock()
-        guard let p, running else { return false }
+        lock.lock()
+        let p = procs[jid]; let running = jobs[jid]?.status == "running"
+        // Running but not yet tracked (it's still in the launch→track window) → record intent
+        // so the spawn terminates it the moment it's tracked, instead of slipping past Stop.
+        if running && p == nil { cancelIntent.insert(jid) }
+        lock.unlock()
+        guard let p, running else { return running }   // report success when intent was queued
         p.terminate()
         return true
     }
@@ -162,7 +176,10 @@ final class ChatRunner: @unchecked Sendable {
     /// Terminate EVERY running turn (Panic Stop). Returns how many were killed.
     @discardableResult
     func cancelAll() -> Int {
-        lock.lock(); let running = procs.values.filter { $0.isRunning }; lock.unlock()
+        lock.lock()
+        let running = procs.values.filter { $0.isRunning }
+        for (jid, job) in jobs where job.status == "running" && procs[jid] == nil { cancelIntent.insert(jid) }
+        lock.unlock()
         running.forEach { $0.terminate() }
         return running.count
     }

@@ -135,7 +135,10 @@ final class UsageStore: ObservableObject {
                 endMisses[id] = nil
             } else {                               // first miss → keep tracking, don't fire yet
                 endMisses[id] = misses
-                carried[id] = prev
+                // Carry the FRESHEST parsed snapshot (tokens/agents/queued) if the session is
+                // still present-but-not-working, falling back to the previous scan only when it
+                // genuinely vanished — so the debounce window doesn't freeze stale values.
+                carried[id] = byId[id] ?? prev
             }
         }
         for id in workingNow.keys { endMisses[id] = nil }   // working again → reset its counter

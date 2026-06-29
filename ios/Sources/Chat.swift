@@ -73,9 +73,15 @@ final class ChatStore: ObservableObject {
             // local-only error/"Stopped" bubble) can leave the device ahead of the
             // server's lagging JSONL — replacing then would drop the newest messages.
             guard hist.count >= threads[i].messages.count else { return }
+            // Preserve a trailing local "Stopped"/error marker ONLY at the equal-length
+            // boundary (where the server isn't strictly ahead) — if the server gained a real
+            // new reply (strictly longer), show that instead.
+            let trailingMarker = (threads[i].messages.last?.role == .error && hist.count == threads[i].messages.count)
+                ? threads[i].messages.last : nil
             threads[i].messages = hist.map {
                 ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text)
             }
+            if let m = trailingMarker { threads[i].messages.append(m) }
             save()
         }
     }
@@ -118,6 +124,7 @@ final class ChatStore: ObservableObject {
     func stop(_ id: String) {
         if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }
         stopping.insert(id)
+        activeStreams.remove(id)   // free the stream slot NOW so a quick Retry isn't dropped by the activeStreams guard
         busy.remove(id); busyJob[id] = nil
         if let i = threads.firstIndex(where: { $0.id == id }),
            threads[i].messages.last?.role != .assistant {
@@ -202,6 +209,13 @@ final class ChatStore: ObservableObject {
         let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: t.cwd)
         guard hist.last?.role == "assistant",                      // turn finished iff it ends with a reply
               let i = threads.firstIndex(where: { $0.id == threadId }) else { return false }
+        // Don't clobber a longer local thread, and only treat THIS turn as finished if the
+        // transcript's last prompt is the one we sent — otherwise we'd drop a just-queued local
+        // user message and surface a stale prior reply as if it were the new one.
+        guard hist.count >= threads[i].messages.count else { return false }
+        let localLastUser = threads[i].messages.last(where: { $0.role == .user })?.text
+        let histLastUser = hist.last(where: { $0.role == "user" })?.text
+        guard localLastUser == nil || localLastUser == histLastUser else { return false }
         threads[i].messages = hist.map { ChatMessage(role: $0.role == "assistant" ? .assistant : .user, text: $0.text) }
         threads[i].updatedAt = Date(); threads.sort { $0.updatedAt > $1.updatedAt }
         busy.remove(threadId); busyJob[threadId] = nil; reconnecting.remove(threadId); save()
@@ -253,7 +267,13 @@ final class ChatStore: ObservableObject {
     private func finish(_ id: String, _ role: ChatMessage.Role, _ text: String) {
         finalize(id, nil, text, role)
     }
-    func delete(_ id: String) { threads.removeAll { $0.id == id }; busy.remove(id); save() }
+    func delete(_ id: String) {
+        if let job = busyJob[id] { EdgeClient.shared.cancelChat(jobId: job) }   // kill the Mac claude process
+        stopping.insert(id); activeStreams.remove(id)                            // streamJob loop bails next tick
+        threads.removeAll { $0.id == id }
+        busy.remove(id); busyJob[id] = nil                                       // drop the orphan job before save()
+        save()
+    }
     func rename(_ id: String, to title: String) {
         guard let i = threads.firstIndex(where: { $0.id == id }) else { return }
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -830,10 +850,19 @@ private func parseMarkdown(_ text: String) -> [MDBlock] {
             blocks.append(.table(headers, rows)); continue
         }
         if line.hasPrefix("```") {                                   // fenced code (robust to unclosed during streaming)
-            let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            let openTicks = line.prefix(while: { $0 == "`" }).count   // 3+ backticks
+            let lang = String(line.dropFirst(openTicks)).trimmingCharacters(in: .whitespaces)
             var body: [String] = []; i += 1
-            while i < lines.count && !trimmed(i).hasPrefix("```") { body.append(lines[i]); i += 1 }
-            i += 1
+            // Close only on an all-backtick line of >= the opening length (so ``` inside a
+            // ~~~ block, or a code line starting with backticks, doesn't close early), and
+            // only consume the closer if one actually exists (don't drop the next line when
+            // the fence is still open mid-stream).
+            func isCloser(_ s: String) -> Bool {
+                let t = s.trimmingCharacters(in: .whitespaces)
+                return t.count >= openTicks && t.allSatisfy { $0 == "`" }
+            }
+            while i < lines.count && !isCloser(trimmed(i)) { body.append(lines[i]); i += 1 }
+            if i < lines.count { i += 1 }
             blocks.append(.code(lang, body.joined(separator: "\n"))); continue
         }
         if line.hasPrefix("⚙ ") {                                    // tool marker from the Mac stream

@@ -65,10 +65,15 @@ final class EdgePanelState: ObservableObject {
     func setAutoApprove(_ on: Bool) {
         autoApprove = on
         UserDefaults.standard.set(on, forKey: "edgepanel.autoApprove")
-        // Clear anything already waiting — EXCEPT the irreversible 1%, which Guardian
-        // always holds for a tap even in Autonomous, so flipping the toggle on can't
-        // wave through an rm -rf / force-push that was already sitting on the gate.
-        if on, let p = pending, !p.alwaysDangerous { resolveCurrent(.allow) }
+        // Drain EVERY held non-dangerous request (not just the surfaced one) so flipping
+        // Autonomous on is truly hands-off — otherwise sibling held requests hang until their
+        // 30s timeout. The irreversible 1% (alwaysDangerous) stays held for a tap, preserving
+        // the Guardian guarantee. Snapshot the keys: resolve() mutates pendingById mid-loop.
+        if on {
+            for bid in Array(pendingById.keys) where pendingById[bid]?.alwaysDangerous == false {
+                resolve(bid, .allow)
+            }
+        }
     }
 
     /// PANIC STOP: kill every running chat turn, turn Autonomous off, deny everything
@@ -99,8 +104,12 @@ final class EdgePanelState: ObservableObject {
     private var pendingRules: [String: String] = [:]   // id → allow-rule (for "always", survives rotation)
     private var pendingById: [String: PendingPermission] = [:]   // id → request (to re-surface the next one on resolve)
     private var blockingCounter = 0
-    private let decisionTimeout: TimeInterval =
-        TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 30
+    private let decisionTimeout: TimeInterval = {
+        // Clamp to [0, 3600]: a negative env value would trap on the later UInt64(...) cast,
+        // and NaN/inf resolve to 30. Keeps the Task.sleep conversion safe for any input.
+        let raw = TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 30
+        return raw.isFinite ? min(max(raw, 0), 3600) : 30
+    }()
 
     private var idleTimer: Timer?
 
@@ -228,10 +237,14 @@ final class EdgePanelState: ObservableObject {
                 AllowlistWriter.add(rule: rule)
             }
             resolve(id, .allow)
+        case "allow":
+            resolve(id, .allow)
         case "deny":
             resolve(id, .deny)
         default:
-            resolve(id, .allow)
+            // Fail SAFE: never auto-approve a garbled/unknown decision — fall through to
+            // Claude Code's native prompt (matches the timeout path), don't allow.
+            resolve(id, .ask)
         }
     }
 
@@ -253,7 +266,9 @@ final class EdgePanelState: ObservableObject {
             // rather than in arbitrary dictionary order.
             let nextId = pendingById.keys.min { (Int($0.dropFirst()) ?? 0) < (Int($1.dropFirst()) ?? 0) }
             pending = nextId.flatMap { pendingById[$0] }
-            onApprovalChange?(pending != nil)
+            // Keep the panel pinned open while EITHER gate is still outstanding (a held
+            // question must not be hidden just because the last permission resolved).
+            onApprovalChange?(pending != nil || pendingQuestion != nil)
         }
     }
 
@@ -302,7 +317,8 @@ final class EdgePanelState: ObservableObject {
         guard let continuation = questionResolvers.removeValue(forKey: qid) else { return }
         continuation.resume(returning: answers)
         if pendingQuestion?.id == qid { pendingQuestion = nil }
-        onApprovalChange?(false)
+        // Don't drop the panel while a permission is still held on the gate.
+        onApprovalChange?(pending != nil || pendingQuestion != nil)
     }
 
     private func pushQuestionAlert(_ q: PendingQuestion) {
@@ -368,6 +384,7 @@ final class EdgePanelState: ObservableObject {
     private var activityPushTokens: [String: String] = [:]   // sessionId → Live Activity token
     private var devicePushToken: String?
     private var lastFinishedDetail: String?   // "1m 36s · 18.4K tokens" — used as the Island's done detail
+    private var endsThisScan = 0              // non-editor sessions that ended in the current detectEnded scan
     private var pendingEndTask: Task<Void, Never>?   // deferred Live Activity "end" (cancellable if work resumes)
 
     private var pushToStartToken: String?     // iOS 17.2+ push-to-start (pop the Island up while closed)
@@ -419,6 +436,7 @@ final class EdgePanelState: ObservableObject {
     /// Push on membership change, AND every ~12s while running so the token counts
     /// refresh on the Lock Screen (tokens don't self-tick like the timer does).
     func pushAggregate(working rawWorking: [LiveSession]) {
+        endsThisScan = 0   // this scan's ends are already baked into lastFinishedDetail; clear for the next scan
         guard APNsPusher.shared.enabled else { return }
         // Editor sessions you're physically watching never drive the Island (it'd never stop
         // while you work at the Mac) — only remote/non-editor work does, so the Island ends
@@ -511,7 +529,13 @@ final class EdgePanelState: ObservableObject {
         let m = Int(elapsed) / 60, sec = Int(elapsed) % 60
         let elapsedStr = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
         let baseDetail = "\(elapsedStr) · \(fmtTokens(s.turnTokens)) tokens"
-        lastFinishedDetail = baseDetail   // pushAggregate (fires right after) shows this as the Island's done detail
+        // Only a NON-editor finish sets the Island's done caption (editor sessions aren't on
+        // the Island), and when several end in the same scan show an aggregate count instead of
+        // just the last one's detail. endsThisScan is reset by pushAggregate (the scan-closing call).
+        if !s.isEditor {
+            endsThisScan += 1
+            lastFinishedDetail = endsThisScan > 1 ? "\(endsThisScan) chats finished" : baseDetail
+        }
         let project = s.project, cwd = s.cwd, dt = devicePushToken
         // Outcome Card: enrich the "done" alert with WHAT changed (git working-tree diff),
         // computed off-main so the git call never blocks the UI.

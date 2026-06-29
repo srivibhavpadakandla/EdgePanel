@@ -582,6 +582,7 @@ struct CalendarCard: View {
                 }
             }
         }
+        .onChange(of: monthStart) { _, _ in selected = nil }   // month rolled over → clear stale day selection
     }
     @ViewBuilder
     private func cell(_ day: Int, today: Int, total: Int, level: (Int) -> Int) -> some View {

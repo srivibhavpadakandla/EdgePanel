@@ -30,17 +30,20 @@ public enum RiskEngine {
         if let path = filePath ?? event?.filePath {
             return assessFile(tool: bare, path: path, cwd: cwd ?? event?.cwd)
         }
-        if bare.contains("read") || bare.contains("grep") || bare.contains("glob") || bare.contains("ls") || bare.contains("list") || bare.contains("search") {
-            return RiskAssessment(level: .read, reason: "read-only", alwaysDangerous: false)
-        }
-        if bare.contains("write") || bare.contains("edit") || bare.contains("create") || bare.contains("update") {
-            return RiskAssessment(level: .write, reason: "modifies a file", alwaysDangerous: false)
+        // Severity order matters: a DESTRUCTIVE verb wins over any co-occurring read/write
+        // verb, so e.g. an MCP tool named "search_and_delete" isn't downgraded to .read and
+        // auto-allowed. (Mirrors ToolRisk.classify's destructive-before-read ordering.)
+        if bare.contains("delete") || bare.contains("remove") || bare.contains("deploy") || bare.contains("publish") || bare.contains("kill") {
+            return RiskAssessment(level: .danger, reason: "destructive action", alwaysDangerous: true)
         }
         if bare.contains("fetch") || bare.contains("web") || bare.contains("http") {
             return RiskAssessment(level: .danger, reason: "network access", alwaysDangerous: false)
         }
-        if bare.contains("delete") || bare.contains("remove") || bare.contains("deploy") || bare.contains("publish") || bare.contains("kill") {
-            return RiskAssessment(level: .danger, reason: "destructive action", alwaysDangerous: true)
+        if bare.contains("write") || bare.contains("edit") || bare.contains("create") || bare.contains("update") {
+            return RiskAssessment(level: .write, reason: "modifies a file", alwaysDangerous: false)
+        }
+        if bare.contains("read") || bare.contains("grep") || bare.contains("glob") || bare.contains("ls") || bare.contains("list") || bare.contains("search") {
+            return RiskAssessment(level: .read, reason: "read-only", alwaysDangerous: false)
         }
         return RiskAssessment(level: .unknown, reason: "needs approval", alwaysDangerous: false)
     }
@@ -188,7 +191,13 @@ public enum RiskEngine {
         if cmd.contains("curl ") || cmd.contains("wget ") {
             let loopbackHost = cmd.range(of: #"(://|@|\s|=)(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?([/\s"']|$)"#, options: .regularExpression) != nil
             let externalURL = cmd.range(of: #"https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])"#, options: .regularExpression) != nil
-            if loopbackHost && !externalURL {
+            // Shipping a LOCAL FILE / body (-d @file, --data*@file, --upload-file, --form,
+            // POST/PUT) is exfiltration even to a loopback target (the local service can forward
+            // it), so it can't take the calm "local request" downgrade. cmd is already
+            // lowercased, so match long flags + the @file marker (case-safe — curl's -F/-T/-d
+            // collide with -f/-t case-folded).
+            let sendsData = cmd.range(of: #"(--data\b|--data-[a-z]+\b|--upload-file\b|--form\b|--post-file\b|--post-data\b|--request\s+(post|put)|\s-d\s*@|=@)"#, options: .regularExpression) != nil
+            if loopbackHost && !externalURL && !sendsData {
                 return RiskAssessment(level: .read, reason: "local request", alwaysDangerous: false)
             }
             return amber("network request")
@@ -213,8 +222,22 @@ public enum RiskEngine {
         let inWorkspace = cwd.map { p.hasPrefix(($0 as NSString).expandingTildeInPath) } ?? false
         let writing = tool.contains("write") || tool.contains("edit") || tool.contains("create")
 
-        if inSystem {
-            return RiskAssessment(level: .danger, reason: writing ? "writes a system file" : "reads a system file", alwaysDangerous: writing)
+        // The irreversible 1% at the USER level: login/boot persistence, credentials, shell
+        // init, and EdgePanel's own allowlist file. These expand to ~/Library/... or ~/.x and
+        // do NOT match the root-anchored /library /etc checks above, so without this they'd be
+        // a plain .write that Autonomous mode silently auto-allows. Writing them = persistence,
+        // credential theft, or self-modifying the permission allowlist → always require a tap.
+        let home = NSHomeDirectory().lowercased()
+        func underHome(_ rel: String) -> Bool { lower.hasPrefix(home + rel) }
+        let sensitiveUser = underHome("/.ssh") || underHome("/library/launchagents") || underHome("/library/launchdaemons")
+            || underHome("/.claude/settings") || underHome("/.zshrc") || underHome("/.zprofile") || underHome("/.zshenv")
+            || underHome("/.bashrc") || underHome("/.bash_profile") || underHome("/.profile")
+            || lower.hasPrefix("/private/var/at/tabs")
+
+        if inSystem || (writing && sensitiveUser) {
+            return RiskAssessment(level: .danger,
+                                  reason: writing ? "writes a sensitive file" : "reads a system file",
+                                  alwaysDangerous: writing)
         }
         if writing {
             return RiskAssessment(level: .write, reason: inWorkspace ? "edits a project file" : "writes outside the workspace", alwaysDangerous: false)

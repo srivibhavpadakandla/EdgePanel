@@ -122,7 +122,14 @@ public final class HTTPServer: @unchecked Sendable {
     }
 
     private func send(_ response: HTTPResponse, on conn: NWConnection) {
+        // Bound the write side too: a peer that stops draining its receive window would
+        // otherwise pin this connection until OS TCP teardown (contentProcessed only fires
+        // once the kernel send buffer drains). Mirrors the 15s receive watchdog. Safe vs the
+        // held-permission flow — the handler has already returned by the time send() runs.
+        let sendTimeout = DispatchWorkItem { conn.cancel() }
+        queue.asyncAfter(deadline: .now() + 15, execute: sendTimeout)
         conn.send(content: response.serialized(), completion: .contentProcessed { _ in
+            sendTimeout.cancel()
             conn.cancel()
         })
     }

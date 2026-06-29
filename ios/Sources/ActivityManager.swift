@@ -151,6 +151,10 @@ final class ActivityManager {
                 if Task.isCancelled { return }                      // a new turn reclaimed this activity
                 await act.end(ActivityContent(state: done, staleDate: nil),
                               dismissalPolicy: .after(Date().addingTimeInterval(6)))
+                // A new turn may have run sync() during the awaits above, cancelling us and
+                // re-adopting/recreating `aggregate`. Only tear down if we STILL own it, so the
+                // race loser doesn't nil a freshly-adopted activity or its push-token task.
+                guard !Task.isCancelled, aggregate?.id == act.id else { return }
                 aggregate = nil
                 pushTokenTask?.cancel(); pushTokenTask = nil
                 endTask = nil
@@ -168,17 +172,19 @@ final class ActivityManager {
         // closed — no app wake-up needed. The bounded timer still self-ticks live.
         let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
         let content = ActivityContent(state: state, staleDate: nil)
-        if let act = aggregate, act.activityState == .active {
+        // Update reuses an active OR stale activity — update transitions stale→active, so a
+        // push-started (stale) Island is driven back to life instead of stranded as a duplicate.
+        if let act = aggregate, act.activityState == .active || act.activityState == .stale {
             Task { await act.update(content) }
         } else {
-            // A dead/ended aggregate (the Mac may have ended it via APNs) → drop the stale
-            // reference + tasks so we don't update a corpse, then re-adopt a still-active
-            // activity if one exists (push-start race) before creating a duplicate.
+            // A genuinely dead/ended aggregate → drop the stale reference + tasks so we don't
+            // update a corpse, then re-adopt any still-live activity (active or stale, e.g. a
+            // push-start race) before creating a duplicate.
             if aggregate != nil {
                 aggregate = nil; endTask?.cancel(); endTask = nil
                 pushTokenTask?.cancel(); pushTokenTask = nil
             }
-            if let existing = Activity<WorkingAttributes>.activities.first(where: { $0.activityState == .active }) {
+            if let existing = Activity<WorkingAttributes>.activities.first(where: { $0.activityState == .active || $0.activityState == .stale }) {
                 aggregate = existing; observePushToken(existing)
                 Task { await existing.update(content) }
                 return
