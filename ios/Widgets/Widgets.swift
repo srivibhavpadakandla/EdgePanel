@@ -6,6 +6,7 @@ import ActivityKit
 struct EdgePanelWidgetBundle: WidgetBundle {
     var body: some Widget {
         WorkingLiveActivity()
+        UsageWidget()          // Lock Screen / Home Screen usage %
     }
 }
 

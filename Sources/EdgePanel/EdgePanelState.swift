@@ -683,6 +683,15 @@ final class EdgePanelState: ObservableObject {
 
     /// Push an "end" Live Activity update + alert when a session finishes — so the
     /// phone updates even if the app is closed. No-op unless APNs is configured.
+    /// Push a 5-hour usage alert (APNs + ntfy) — owned by the Mac so it reaches the phone
+    /// even when the app is closed (the app's own poll-driven check only ran while it was open).
+    func pushUsageAlert(title: String, body: String) {
+        if APNsPusher.shared.enabled, let dt = devicePushToken {
+            APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
+        }
+        NtfyPusher.shared.pushDone(title: title, detail: body)
+    }
+
     func pushSessionEnded(_ s: LiveSession) {
         // Editor sessions (claude-vscode/desktop) now ALSO send a "finished" push so you get
         // notified on the phone when a turn you started at the Mac completes. The phone

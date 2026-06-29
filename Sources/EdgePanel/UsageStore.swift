@@ -364,6 +364,35 @@ final class UsageStore: ObservableObject {
         burn = computeBurn(p, now)
         scheduleResetRefresh(p.fiveHourReset)
         planFetchInFlight = false
+        checkUsageAlert(p)
+    }
+
+    /// Usage guardrail — fires the 80%/90% + "on track to hit the cap" alerts from the
+    /// ALWAYS-ON Mac (so they reach the phone even when the app is closed), instead of the
+    /// app's poll loop (which only runs while the app is open). Re-arms on a window reset.
+    var onUsageAlert: ((String, String) -> Void)?
+    private var usageAlerted: Set<Int> = []
+    private var usageLastPct = 0.0
+    private var usageForecastAlerted = false
+    private func checkUsageAlert(_ p: PlanUsage) {
+        let pct = p.fiveHourPct
+        if pct < usageLastPct - 5 { usageAlerted.removeAll(); usageForecastAlerted = false }  // window reset → re-arm
+        usageLastPct = pct
+        for thr in [80, 90] where pct >= Double(thr) && !usageAlerted.contains(thr) {
+            usageAlerted.insert(thr)
+            onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
+                          "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
+        }
+        if let hit = limitClock {
+            let mins = hit.timeIntervalSinceNow / 60
+            if mins > 0, mins <= 45, pct >= 50, !usageForecastAlerted {
+                usageForecastAlerted = true
+                let t = DateFormatter.localizedString(from: hit, dateStyle: .none, timeStyle: .short)
+                onUsageAlert?("⏳ On track to hit your 5-hour cap",
+                              "At this pace, around \(t). Ease off or pause autonomous tasks.")
+            }
+            if mins > 60 || mins <= 0 { usageForecastAlerted = false }
+        } else { usageForecastAlerted = false }
     }
 
     private func applyPlanFailure() {

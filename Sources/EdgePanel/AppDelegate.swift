@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // of working chats changes, so the Island stops the instant a turn finishes.
         store.onWorkingChanged = { [weak self] w in self?.state.pushAggregate(working: w) }
         store.onModeChanged = { [weak self] m in self?.state.permissionMode = m }
+        // 5-hour limit alerts come from the always-on Mac → reach the phone even when closed.
+        store.onUsageAlert = { [weak self] title, body in self?.state.pushUsageAlert(title: title, body: body) }
         store.onEffortChanged = { [weak self] e in self?.state.setEffort(e) }
 
         startServer()

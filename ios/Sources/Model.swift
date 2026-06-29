@@ -274,6 +274,11 @@ final class EdgeClient: ObservableObject {
             guard code == 200 else { throw URLError(.badServerResponse) }
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
             snapshot = snap; connected = true; lastError = nil; lastUpdated = Date()
+            // Mirror the usage % to the App Group so the Lock Screen widget shows it live.
+            if let p = snap.plan {
+                UsageShared.write(fiveHourPct: p.fiveHourPct, weekPct: p.weekPct,
+                                  fiveHourResetEpoch: p.fiveHourResetEpoch)
+            }
             // After a connectivity gap (>10s blind), sessions may have finished while we
             // couldn't see them — drop the stale baseline so we re-seed instead of firing a
             // burst of bogus "done" Island flips for sessions that ended minutes ago.
@@ -286,7 +291,9 @@ final class EdgeClient: ObservableObject {
             // always has a fresh token to push the "end" — even right after a Mac restart
             // (which used to leave the Island frozen on a stuck timer).
             ActivityManager.shared.resendActivityToken()
-            ActivityManager.shared.checkUsage(plan: snap.plan)
+            // Usage limit alerts are now owned by the always-on Mac (pushUsageAlert) so they
+            // reach the phone even when the app is CLOSED — not just when you open it. (The old
+            // poll-driven checkUsage only ran while the app was open.)
             ActivityManager.shared.syncPermission(snap.pending)
             ActivityManager.shared.syncQuestion(snap.question)
         } catch {

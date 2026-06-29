@@ -39,3 +39,4 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.srivibhav.edgepanel.mobile.widgets
         INFOPLIST_FILE: Widgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Widgets/EdgePanelWidgets.entitlements
