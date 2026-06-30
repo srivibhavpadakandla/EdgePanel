@@ -17,6 +17,7 @@ struct WorkingAttributes: ActivityAttributes {
         var tokens: Int
         var agents: Int = 0         // subagents running this turn (live proof-of-work)
         var queued: Int = 0         // prompts waiting in line behind this turn
+        var activity: String = ""   // what it's doing right now, e.g. "Editing Chat.swift"
         var freezeAt: Double = 0    // wall-clock the timer stops at (app refreshes it forward while alive)
         // Cap the lower bound at "now" so the count-up always starts ticking from 0 even
         // under Mac/phone clock skew or a missing promptAtEpoch (it never sticks at 00:00).

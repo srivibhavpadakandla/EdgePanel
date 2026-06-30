@@ -59,6 +59,7 @@ struct EdgeSnapshot: Codable {
         var modeKey: String = "ask"      // this chat's permission mode
         var effortKey: String = ""       // this chat's reasoning effort
         var isEditor: Bool = false   // editor session you're watching at the Mac → kept off the Island
+        var activity: String? = nil  // what it's doing right now, e.g. "Editing Chat.swift"
         var promptAt: Date? { promptAtEpoch.map { Date(timeIntervalSince1970: $0) } }
         /// The prompt to show: the Mac's summary if present, else the raw prompt.
         var display: String { (promptSummary?.isEmpty == false ? promptSummary : prompt) ?? "working…" }

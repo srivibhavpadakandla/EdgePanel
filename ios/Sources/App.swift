@@ -677,6 +677,10 @@ struct WorkingRow: View {
                     Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
                 }
             }
+            // Live "doing now": the current tool Claude is running this turn.
+            if let act = w.activity, !act.isEmpty {
+                ActivityRow(text: act)
+            }
             // Live proof-of-work: subagents running + the actual prompts waiting in line.
             if w.runningAgents > 0 {
                 StatusPill(icon: "person.2.fill", text: "\(w.runningAgents) agent\(w.runningAgents == 1 ? "" : "s") working", color: T.green)
@@ -717,6 +721,53 @@ struct StatusPill: View {
         .foregroundColor(color)
         .padding(.horizontal, 7).padding(.vertical, 2)
         .background(Capsule().fill(color.opacity(0.15)))
+    }
+}
+
+/// The live "doing now" line — the current tool Claude is running, with an icon
+/// chosen from the verb and a softly travelling shimmer so it reads as in-motion.
+struct ActivityRow: View {
+    let text: String
+    @State private var shift = false
+    private var icon: String {
+        let t = text.lowercased()
+        if t.hasPrefix("editing") { return "pencil.line" }
+        if t.hasPrefix("reading") { return "book" }
+        if t.hasPrefix("running") { return "terminal" }
+        if t.hasPrefix("searching") { return "magnifyingglass" }
+        if t.hasPrefix("delegating") || t.contains("subagent") { return "person.2.fill" }
+        if t.hasPrefix("browsing") { return "globe" }
+        if t.hasPrefix("planning") { return "checklist" }
+        return "gearshape.fill"
+    }
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(T.green)
+                .symbolEffect(.pulse, options: .repeating)
+            Text(text)
+                .font(.claude(12.5, .medium))
+                .foregroundColor(T.text.opacity(0.92))
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 8).fill(T.green.opacity(0.12))
+                // A soft highlight that slides left→right, like a progress shimmer.
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(LinearGradient(colors: [.clear, T.green.opacity(0.18), .clear],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: 70)
+                    .offset(x: shift ? 240 : -90)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        )
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) { shift = true }
+        }
     }
 }
 

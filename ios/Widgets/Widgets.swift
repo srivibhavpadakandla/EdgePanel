@@ -58,6 +58,10 @@ struct WorkingLiveActivity: Widget {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("“\(p.prompt)”").font(.system(size: 13, design: .serif))
                                     .foregroundColor(.white.opacity(0.9)).lineLimit(2)
+                                if !p.activity.isEmpty {
+                                    Label(p.activity, systemImage: activityIcon(p.activity))
+                                        .font(.system(size: 11, weight: .medium)).foregroundColor(olive).lineLimit(1)
+                                }
                                 HStack(spacing: 6) {
                                     Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
                                         .font(.system(size: 11)).foregroundColor(.gray)
@@ -132,8 +136,13 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(s.project).font(.system(size: 13, weight: .semibold, design: .serif))
                     .foregroundColor(.white).lineLimit(1)
-                Text("“\(s.prompt)”").font(.system(size: 11, design: .serif))
-                    .foregroundColor(.white.opacity(0.7)).lineLimit(1)
+                if !s.activity.isEmpty {
+                    Label(s.activity, systemImage: activityIcon(s.activity))
+                        .font(.system(size: 11, weight: .medium)).foregroundColor(olive).lineLimit(1)
+                } else {
+                    Text("“\(s.prompt)”").font(.system(size: 11, design: .serif))
+                        .foregroundColor(.white.opacity(0.7)).lineLimit(1)
+                }
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 1) {
@@ -174,6 +183,10 @@ struct LockScreenView: View {
             } else if state.count <= 1, let p = state.primary {
                 Text("“\(p.prompt)”").font(.system(size: 13, design: .serif))
                     .foregroundColor(.white.opacity(0.85)).lineLimit(2)
+                if !p.activity.isEmpty {
+                    Label(p.activity, systemImage: activityIcon(p.activity))
+                        .font(.system(size: 11, weight: .medium)).foregroundColor(olive).lineLimit(1)
+                }
                 HStack(spacing: 7) {
                     Text(p.tokens == 0 ? "starting…" : "\(fmtTok(p.tokens)) tokens this turn")
                         .font(.system(size: 11)).foregroundColor(.gray)
@@ -191,6 +204,19 @@ struct LockScreenView: View {
             }
         }
     }
+}
+
+/// SF Symbol for a live "doing now" activity label, chosen from its leading verb.
+private func activityIcon(_ text: String) -> String {
+    let t = text.lowercased()
+    if t.hasPrefix("editing") { return "pencil.line" }
+    if t.hasPrefix("reading") { return "book" }
+    if t.hasPrefix("running") { return "terminal" }
+    if t.hasPrefix("searching") { return "magnifyingglass" }
+    if t.hasPrefix("delegating") || t.contains("subagent") { return "person.2.fill" }
+    if t.hasPrefix("browsing") { return "globe" }
+    if t.hasPrefix("planning") { return "checklist" }
+    return "gearshape.fill"
 }
 
 private func fmtTok(_ t: Int) -> String {
