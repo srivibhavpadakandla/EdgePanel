@@ -58,6 +58,21 @@ final class ActivityManager {
             UNNotificationCategory(identifier: "PERMISSION", actions: [allow, deny],
                                    intentIdentifiers: [], options: [])
         ])
+        startTokenObservers()
+    }
+
+    private var observersStarted = false
+    /// Register the Live Activity token observers + wire the token sink to the Mac. MUST run at
+    /// PROCESS LAUNCH (PushDelegate.didFinishLaunching), not just .onAppear — when iOS briefly
+    /// background-launches the app to hand it a push-STARTED Island's token, there is no UI so
+    /// .onAppear never fires. Without this the Mac never learns the Island's token and can never
+    /// push its "end" → the Island counts forever. Idempotent.
+    func startTokenObservers() {
+        guard !observersStarted else { return }
+        observersStarted = true
+        onPushToken = { kind, sid, tok in
+            Task { @MainActor in EdgeClient.shared.postPushToken(kind: kind, sessionId: sid, pushToken: tok) }
+        }
         observePushToStart()
         observeActivityUpdates()
     }

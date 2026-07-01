@@ -22,6 +22,11 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Register the Live Activity token observers HERE (every process launch, incl. the headless
+        // background launch iOS does to hand us a push-STARTED Island's token). If this only ran in
+        // the UI's .onAppear, a closed app never vends the token → the Mac can't push the Island's
+        // "end" → it counts forever. Idempotent, so .onAppear calling it again is harmless.
+        ActivityManager.shared.startTokenObservers()
         // Best-effort background reconcile: lets a finished prompt flip the Live
         // Activity to done + fire its notification even while the app is backgrounded.
         BGTaskScheduler.shared.register(forTaskWithIdentifier: bgRefreshID, using: nil) { task in
