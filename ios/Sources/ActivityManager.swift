@@ -59,6 +59,7 @@ final class ActivityManager {
                                    intentIdentifiers: [], options: [])
         ])
         observePushToStart()
+        observeActivityUpdates()
     }
 
     /// Forward the push-to-start token (iOS 17.2+) to the Mac, so it can pop the
@@ -69,6 +70,19 @@ final class ActivityManager {
             for await tokenData in Activity<WorkingAttributes>.pushToStartTokenUpdates {
                 let hex = tokenData.map { String(format: "%02x", $0) }.joined()
                 onPushToken?("starttoken", nil, hex)
+            }
+        }
+    }
+
+    /// Adopt any activity the Mac PUSH-STARTED while we were closed and immediately vend its
+    /// update token to the Mac. iOS gives us brief background runtime when a push-to-start lands,
+    /// so this lets the Mac later UPDATE + END that Island (tokens refresh, clean "done") instead
+    /// of leaving a push-started Island ticking with no way to close it.
+    private func observeActivityUpdates() {
+        Task {
+            for await activity in Activity<WorkingAttributes>.activityUpdates {
+                if aggregate == nil || aggregate?.activityState != .active { aggregate = activity }
+                observePushToken(activity)
             }
         }
     }
