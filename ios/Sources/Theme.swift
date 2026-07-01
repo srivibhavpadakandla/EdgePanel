@@ -46,19 +46,6 @@ extension Font {
 }
 
 func sevColor(_ f: Double) -> Color { f >= 0.8 ? T.red : f >= 0.5 ? T.amber : T.green }
-
-/// The colour a permission mode wears across the app (mascot, hero, mode tiles). A waiting
-/// permission's risk overrides it — hot for danger, amber for a write.
-func modeTint(_ mode: String?, risk: String? = nil) -> Color {
-    if risk == "danger" { return T.red }
-    if risk == "write"  { return T.amber }
-    switch mode {
-    case "bypass": return T.red
-    case "edit":   return T.amber
-    case "auto":   return T.accent
-    default:       return T.accent2   // plan / ask
-    }
-}
 func fmtPct(_ f: Double) -> String { "\(Int((min(max(f, 0), 1) * 100).rounded()))%" }
 func fmtCost(_ c: Double) -> String {
     if c >= 1000 { return String(format: "$%.0f", c) }
