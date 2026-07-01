@@ -29,13 +29,25 @@ Slam your cursor to the right edge of the screen and EdgePanel slides in. Move a
 
 ## Screenshots
 
-| Desktop panel | Multi-chat mode/effort | Dynamic Island |
-|---|---|---|
-| ![panel](docs/panel.png) | ![grouped](docs/mode-grouped.png) | ![island](docs/dynamic-island.png) |
+### The desktop panel
 
-| iPhone dashboard | Phone command center (chat → your editor) |
+| The panel | Multi-chat mode/effort grouping |
 |---|---|
-| ![ios](docs/ios-dashboard.png) | ![command](docs/ios-command.png) |
+| ![panel](docs/panel.png) | ![grouped](docs/mode-grouped.png) |
+| Mascot, live **mode + effort**, plan **% with burn rate**, **Working Now** (project · prompt · live timer · tokens), and a days-used **heatmap** — all read from disk, zero setup. | Two or more chats open? They **collapse by shared (mode, effort)** so you see every session's setting at a glance. |
+
+### The iPhone companion
+
+| Dashboard | Command center | Permission | Question |
+|---|---|---|---|
+| ![dashboard](docs/ios-dashboard.png) | ![command](docs/ios-command.png) | ![permission](docs/ios-permission.png) | ![question](docs/ios-question.png) |
+| The whole panel in your pocket — plan %, **mode + effort**, and **Working Now** with a **live tool feed** ("Editing WorkingCard.swift") and agents/queue badges. | **Type here → it types into the chat open in your editor**; run idle sessions headless; jump back into any recent chat. | **Approve / Deny / Always** on tool calls — risk-colored, with a **command or diff preview**. | Answer Claude's **`AskUserQuestion`** multiple-choice prompts from your phone; the turn continues. |
+
+### Dynamic Island
+
+![Dynamic Island](docs/dynamic-island.png)
+
+Every running prompt on the Lock Screen and in the Dynamic Island — a self-ticking timer, token count, and a proof-of-work caption — flipping to ✓ done and tearing down when the turn finishes, **even while the app is fully closed**.
 
 ## Requirements
 
@@ -128,6 +140,10 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 - **Or run a session headless.** For an idle/away session (or a brand-new task), the Mac runs `claude -p --resume … --output-format stream-json` and relays the reply **token-by-token** to the phone, with a Stop button. The session transcript is the source of truth, so a dropped connection or app kill recovers the reply instead of losing it.
 
 ### Approve, answer, and stay in control
+
+| Permission approval | Answer a question |
+|---|---|
+| ![permission](docs/ios-permission.png) | ![question](docs/ios-question.png) |
 
 - **Permission approval** — a held `/permission` request is mirrored into the snapshot with its risk, summary, and preview; Allow / Deny / Always from the phone (or right from a notification) returns the decision to Claude Code.
 - **AskUserQuestion** — when Claude asks a multiple-choice question, the options surface on the phone; your answer is fed back so the turn continues.
