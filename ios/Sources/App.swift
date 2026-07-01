@@ -133,8 +133,8 @@ struct UsageTab: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                T.bg.ignoresSafeArea()
-                ScrollView { Dashboard().padding(16).padding(.bottom, 28) }
+                AuroraBackground(tint: birdTint)
+                ScrollView { Dashboard().padding(16).padding(.bottom, 32) }
                     .scrollIndicators(.hidden)
             }
             .safeAreaInset(edge: .top) { header }
@@ -191,35 +191,154 @@ struct UsageTab: View {
             Button { showPair = true } label: { Image(systemName: "gearshape").foregroundColor(T.subtext) }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(T.bg.opacity(0.96))
+        .background(
+            LinearGradient(colors: [T.bg, T.bg.opacity(0.82), T.bg.opacity(0)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top)
+        )
     }
 }
 
 struct Dashboard: View {
     @EnvironmentObject var client: EdgeClient
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             if let s = client.snapshot {
-                if let q = s.question { QuestionCard(q: q).id(q.id) }   // fresh @State per question (no stale selection leak)
-                if let pend = s.pending { PermissionCard(p: pend) }
-                if let p = s.plan { PlanCard(plan: p) }
-                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk)
-                WorkingCard(working: s.working)
-                CalendarCard(days: s.calendar)
-                HStack(spacing: 12) {
-                    WeeklyCard(plan: s.plan)
-                    SpendCard(spend: s.spend)
+                // Alerts always jump to the very top.
+                if let q = s.question { QuestionCard(q: q).id(q.id).appearIn(0) }
+                if let pend = s.pending { PermissionCard(p: pend).appearIn(0) }
+
+                // HERO — the two rings, mascot, and headline stats.
+                HeroPanel(plan: s.plan, spend: s.spend, mode: s.mode,
+                          mascot: s.mascotAnim, risk: s.pending?.risk)
+                    .appearIn(1).scrollFlair()
+
+                let working = s.working
+                if !working.isEmpty {
+                    section("Now working", icon: "dot.radiowaves.left.and.right", tint: T.green, i: 2) {
+                        WorkingCard(working: working)
+                    }
                 }
-                RecentChatsCard(chats: s.chats)
-                PromptHistoryCard(prompts: s.promptHistory ?? [])
+
+                section("Control", icon: "slider.horizontal.3", i: 3) {
+                    ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk)
+                }
+
+                section("This month", icon: "calendar", i: 4) {
+                    CalendarCard(days: s.calendar)
+                }
+
+                section("History", icon: "clock.arrow.circlepath", i: 5) {
+                    VStack(spacing: 14) {
+                        RecentChatsCard(chats: s.chats)
+                        PromptHistoryCard(prompts: s.promptHistory ?? [])
+                    }
+                }
             } else {
-                VStack(spacing: 10) {
-                    ProgressView().tint(T.accent)
-                    Text(client.lastError ?? "Connecting to your Mac…")
-                        .font(.claude(13)).foregroundColor(T.subtext).multilineTextAlignment(.center)
-                }.padding(.top, 80)
+                LoadingView(message: client.lastError ?? "Connecting to your Mac…")
             }
         }
+        .animation(.smooth(duration: 0.4), value: client.snapshot?.working.count)
+    }
+
+    // A titled section: animated header + its content, staggered in and scroll-reactive.
+    @ViewBuilder
+    private func section<C: View>(_ title: String, icon: String, tint: Color = T.subtext, i: Int,
+                                  @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            SectionHeader(title: title, icon: icon, tint: tint)
+            content()
+        }
+        .appearIn(i).scrollFlair()
+    }
+}
+
+/// A calm abstract loading state — the mascot idling over a soft pulsing halo — instead of a bare
+/// spinner, so a cold start isn't empty.
+struct LoadingView: View {
+    let message: String
+    @State private var pulse = false
+    var body: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle().fill(T.accent.opacity(0.14)).frame(width: 120, height: 120)
+                    .scaleEffect(pulse ? 1.15 : 0.85).opacity(pulse ? 0.3 : 0.8)
+                AnimatedMascot(name: "idle_breathe", cell: 3.0, fill: T.accent, eye: T.bg, crop: true)
+                    .frame(width: 60, height: 60)
+            }
+            Text(message).font(.claude(13)).foregroundColor(T.subtext).multilineTextAlignment(.center)
+        }
+        .padding(.top, 90)
+        .onAppear { withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true } }
+    }
+}
+
+/// The hero: a big 5-hour usage ring, a smaller weekly ring, the live mascot in its mode colour,
+/// and headline stat chips (spend, burn). Sits on a glass surface so the aurora bleeds through.
+struct HeroPanel: View {
+    let plan: EdgeSnapshot.PlanInfo?
+    let spend: EdgeSnapshot.Spend
+    let mode: String?
+    let mascot: String?
+    let risk: String?
+    @State private var exactReset = false
+
+    private var tint: Color { modeTint(mode, risk: risk) }
+    private var fiveFrac: Double { min(max((plan?.fiveHourPct ?? 0) / 100, 0), 1) }
+    private var weekFrac: Double { min(max((plan?.weekPct ?? 0) / 100, 0), 1) }
+    private var modeLabel: String {
+        switch mode { case "bypass": return "Bypass"; case "edit": return "Edit"
+        case "auto": return "Auto"; case "plan": return "Plan"; default: return "Ask" }
+    }
+    private var resetCaption: String? {
+        guard let reset = plan?.fiveHourResetEpoch else { return nil }
+        let rem = max(reset - Date().timeIntervalSince1970, 0)
+        return exactReset ? timeStr(reset) : "\(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m"
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
+                UsageRing(frac: fiveFrac, label: "5-HOUR", size: 150, lineWidth: 14,
+                          color: sevColor(fiveFrac), caption: resetCaption)
+                    .pressable { exactReset.toggle() }
+                Spacer(minLength: 0)
+                VStack(spacing: 12) {
+                    AnimatedMascot(name: mascot ?? "idle_blink", cell: 2.4, fill: tint, eye: T.bg, crop: true)
+                        .frame(width: 52, height: 52)
+                        .animation(.easeInOut(duration: 0.4), value: mascot)
+                        .animation(.easeInOut(duration: 0.4), value: tint)
+                    Text(modeLabel).font(.claude(11, .semibold)).tracking(0.6).foregroundColor(tint)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Capsule().fill(tint.opacity(0.15)))
+                    UsageRing(frac: weekFrac, label: "WEEK", size: 84, lineWidth: 8,
+                              color: sevColor(weekFrac))
+                }
+            }
+            HStack(spacing: 10) {
+                StatChip(icon: "dollarsign.circle.fill", value: fmtCost(spend.fiveHourUSD),
+                         caption: "5-hour value", tint: T.green)
+                if let burn = plan?.burnPerHour, burn >= 0.5 {
+                    StatChip(icon: "flame.fill", value: "+\(Int(burn.rounded()))%/hr",
+                             caption: plan?.limitClockEpoch.map { "limit ~\(timeStr($0))" } ?? "burn rate",
+                             tint: plan?.limitClockEpoch != nil ? T.red : T.amber)
+                } else {
+                    StatChip(icon: "leaf.fill", value: "Steady", caption: "low burn", tint: T.green)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+                .background(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous).fill(T.bg.opacity(0.35)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [tint.opacity(0.35), Color.white.opacity(0.04)],
+                                                     startPoint: .top, endPoint: .bottom), lineWidth: 1))
+                .shadow(color: .black.opacity(0.4), radius: 16, y: 7)
+        )
     }
 }
 
@@ -361,56 +480,6 @@ struct ModeCard: View {
     }
     private func effortLabel(_ l: String) -> String {
         switch l { case "xhigh": return "X-High"; case "max": return "Max"; default: return l.capitalized }
-    }
-}
-
-struct PlanCard: View {
-    let plan: EdgeSnapshot.PlanInfo
-    @State private var exactReset = false   // tap → toggle relative ↔ exact reset time
-    var body: some View {
-        let frac = min(max(plan.fiveHourPct / 100, 0), 1)
-        let sev = sevColor(frac)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(Int(plan.fiveHourPct.rounded()))").font(.claude(46, .bold)).foregroundColor(T.text)
-                Text("%").font(.claude(24, .bold)).foregroundColor(T.text.opacity(0.55))
-                Spacer()
-                HStack(spacing: 5) {
-                    Circle().fill(sev).frame(width: 6, height: 6)
-                    Text("5-HOUR").font(.claude(11, .semibold)).tracking(0.8).foregroundColor(T.text.opacity(0.85))
-                }
-                .padding(.horizontal, 11).padding(.vertical, 6)
-                .background(Capsule().fill(Color.black.opacity(0.22)))
-            }
-            Bar(frac: frac, color: sev, height: 11)
-            HStack(spacing: 8) {
-                if let reset = plan.fiveHourResetEpoch {
-                    let rem = max(reset - Date().timeIntervalSince1970, 0)
-                    let label = exactReset ? "resets at \(timeStr(reset))" : "resets in \(Int(rem) / 3600)h \((Int(rem) % 3600) / 60)m"
-                    Label(label, systemImage: "arrow.clockwise").font(.claude(12.5)).foregroundColor(T.subtext)
-                }
-                Spacer()
-                if let burn = plan.burnPerHour, burn >= 0.5 {
-                    let clock = plan.limitClockEpoch.map { "~\(timeStr($0))" }
-                    Label("\(clock.map { "\($0) · " } ?? "")+\(Int(burn.rounded()))%/hr", systemImage: "flame.fill")
-                        .font(.claude(12.5, .medium)).foregroundColor(plan.limitClockEpoch != nil ? T.red : T.amber)
-                }
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(LinearGradient(colors: [Color(hex: 0x302720), Color(hex: 0x211C18)], startPoint: .top, endPoint: .bottom))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(LinearGradient(colors: [T.accent.opacity(0.30), Color.white.opacity(0.03)],
-                                                     startPoint: .top, endPoint: .bottom), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.42), radius: 13, x: 0, y: 6)
-        )
     }
 }
 
@@ -800,40 +869,6 @@ struct QueuedList: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 9).fill(T.track.opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(T.border, lineWidth: 1))
-    }
-}
-
-struct WeeklyCard: View {
-    let plan: EdgeSnapshot.PlanInfo?
-    @State private var exactReset = false
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 8) {
-                SectionLabel(text: "Weekly")
-                Text(plan.map { "\(Int($0.weekPct.rounded()))%" } ?? "—").font(.claude(24, .bold)).foregroundColor(T.text)
-                Bar(frac: min(max((plan?.weekPct ?? 0) / 100, 0), 1), color: sevColor((plan?.weekPct ?? 0) / 100))
-                if let reset = plan?.weekResetEpoch {
-                    let rem = max(reset - Date().timeIntervalSince1970, 0)
-                    Text(exactReset ? "resets \(dayStr(reset))" : "resets in \(Int(rem) / 86400)d \((Int(rem) % 86400) / 3600)h")
-                        .font(.claude(11)).foregroundColor(T.subtext)
-                }
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
-    }
-}
-
-struct SpendCard: View {
-    let spend: EdgeSnapshot.Spend
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 8) {
-                SectionLabel(text: "5H Spend")
-                Text(fmtCost(spend.fiveHourUSD)).font(.claude(24, .bold)).foregroundColor(T.text)
-                Text("est. API value · this window").font(.claude(11)).foregroundColor(T.subtext)
-            }
-        }
     }
 }
 
