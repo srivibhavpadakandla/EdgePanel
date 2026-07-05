@@ -9,7 +9,7 @@ Slam your cursor to the right edge of the screen and EdgePanel slides in. Move a
 ## What it does
 
 ### On the desktop (zero setup — all read from disk)
-- **Hover-reveal at the screen edge.** A non-activating panel docked just off the right edge; jamming the edge pixel slides it in, with hysteresis + a dismiss delay so it never flickers. Works over fullscreen apps and never steals focus from your editor.
+- **Hover-reveal at the screen edge.** A non-activating panel docked just off the right edge; *rest* the cursor at the edge for a moment and it slides in (a short dwell so an incidental graze — a scrollbar, a window button — never pops it), with hysteresis + a dismiss delay so it never flickers. A **✕ Close button** hides it on demand (and it won't bounce back until you deliberately return to the edge), and a menu-bar toggle **"Reveal on Edge Hover"** disables auto-reveal entirely. Works over fullscreen apps and never steals focus from your editor.
 - **Live plan usage.** Your 5-hour and weekly limits — percent, reset countdown, and burn rate — from Claude Code's own usage endpoint.
 - **Working now + proof of work.** Which chats are *mid-response right now*: the project, the prompt (auto-summarized by Claude when long), a live clock since you hit enter, tokens this turn, and **"N agents working" / "N queued"** badges so you can see a turn is actually doing something.
 - **Mode & Effort readout.** A live mirror of Claude Code's permission mode (Ask / Edit / Plan / Auto / Bypass) and reasoning effort (Low → Max). With **multiple chats open it groups them by setting** — chats sharing a mode+effort collapse into one category. ([details](#mode--effort-readout))

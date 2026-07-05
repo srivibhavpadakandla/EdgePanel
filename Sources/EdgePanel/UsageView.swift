@@ -635,7 +635,13 @@ struct EdgeUsageView: View {
                     .rotationEffect(.degrees(store.loading ? 360 : 0))
                     .animation(store.loading ? .linear(duration: 0.8).repeatForever(autoreverses: false) : .default, value: store.loading)
             }
-            .buttonStyle(.plain).foregroundColor(t.subtext).frame(width: 42, alignment: .trailing)
+            .buttonStyle(.plain).foregroundColor(t.subtext)
+            // Close: slide the panel away. It stays hidden until you deliberately return to the edge.
+            Button { state.onDismissRequest?() } label: {
+                Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+            }
+            .buttonStyle(.plain).foregroundColor(t.subtext)
+            .help("Hide the panel")
         }
         .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 14)
         .frame(maxWidth: .infinity)

@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.start()
         let view = EdgeUsageView(store: store, state: state)
         let controller = EdgePanelController(rootView: view)
+        controller.hoverEnabled = (UserDefaults.standard.object(forKey: "edgepanel.hoverEnabled") as? Bool) ?? true
         controller.startMonitoring()
         self.controller = controller
 
@@ -30,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onApprovalChange = { [weak controller] pending in
             controller?.approvalPending = pending
         }
+        // The panel's Close (✕) button slides it away (and keeps it away until you go back to the edge).
+        state.onDismissRequest = { [weak controller] in controller?.dismiss() }
         // Tier 2: when a session finishes, push a "done" update to the phone.
         store.onSessionEnded = { [weak self] s in self?.state.pushSessionEnded(s) }
         // Seamless Dynamic Island: push the aggregate state (end/update) when the set
@@ -385,10 +388,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
             let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
+            // Pause the edge-hover so the panel stops popping up on its own; ✓ when reveal is on.
+            let hover = NSMenuItem(title: "Reveal on Edge Hover", action: #selector(toggleHover), keyEquivalent: "")
+            hover.state = (controller?.hoverEnabled ?? true) ? .on : .off
             let pair = NSMenuItem(title: "Pair iPhone…", action: #selector(showPairing), keyEquivalent: "")
             let quit = NSMenuItem(title: "Quit EdgePanel", action: #selector(quit), keyEquivalent: "q")
-            for it in [toggle, pair, quit] { it.target = self }
-            menu.addItem(toggle); menu.addItem(pair); menu.addItem(.separator()); menu.addItem(quit)
+            for it in [toggle, hover, pair, quit] { it.target = self }
+            menu.addItem(toggle); menu.addItem(hover); menu.addItem(pair); menu.addItem(.separator()); menu.addItem(quit)
             statusItem?.menu = menu
             statusItem?.button?.performClick(nil)
             statusItem?.menu = nil
@@ -398,6 +404,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel() { controller?.toggle() }
+    /// Turn edge-hover reveal on/off. When off, the panel only opens from the menu/hotkey
+    /// (or a permission request) — so it can't pop up on its own. Persisted across restarts.
+    @objc private func toggleHover() {
+        guard let c = controller else { return }
+        c.hoverEnabled.toggle()
+        UserDefaults.standard.set(c.hoverEnabled, forKey: "edgepanel.hoverEnabled")
+        if !c.hoverEnabled { c.dismiss() }   // pausing hides it right away
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private var pairingWindow: NSWindow?

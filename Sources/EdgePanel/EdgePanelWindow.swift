@@ -61,6 +61,9 @@ final class EdgePanelController {
     private let hideSlack: CGFloat = 30
     /// How long after the cursor leaves before we slide out. Cancelled on return.
     private let dismissDelay: TimeInterval = 0.4
+    /// How long the cursor must REST at the edge before we reveal — kills accidental pops from
+    /// flicking the cursor to the right edge (scrollbars, close buttons, hot corners).
+    private let revealDwell: TimeInterval = 0.22
 
     // MARK: State
     private(set) var isShown = false
@@ -70,11 +73,19 @@ final class EdgePanelController {
     var approvalPending = false {
         didSet {
             guard approvalPending != oldValue else { return }
-            if approvalPending { cancelHideTimer(); reveal() }
+            // A genuinely NEW permission/question must surface even right after a manual dismiss.
+            if approvalPending { revealSuppressed = false; cancelHideTimer(); reveal() }
         }
     }
+    /// Menu toggle: when false, the cursor never auto-reveals the panel. A held permission
+    /// still surfaces (safety), and the menu / hotkey toggle still opens it on demand.
+    var hoverEnabled = true
+    /// Set by the Close (✕) button — blocks hover-reveal until the cursor leaves the edge zone
+    /// once, so dismissing doesn't instantly bounce the panel back while the cursor is still there.
+    private var revealSuppressed = false
 
     private var hideTimer: Timer?
+    private var dwellTimer: Timer?
     private var globalMonitor: Any?
     private var localMonitor: Any?
 
@@ -159,9 +170,12 @@ final class EdgePanelController {
         let atEdge = onTargetVertically && p.x >= f.maxX - revealHotZone
         let wellClear = p.x < innerEdgeX() - hideSlack
 
-        if atEdge {
+        // Cursor left the reveal zone → re-arm (a Close-button dismiss only holds until you move away).
+        if !atEdge { revealSuppressed = false; cancelDwell() }
+
+        if atEdge && hoverEnabled && !revealSuppressed {
             cancelHideTimer()
-            reveal()
+            scheduleReveal()          // dwell first, so an incidental graze doesn't pop it open
         } else if isShown {
             // Between the edge and `inner - slack` is the dead band: keep open.
             if wellClear { scheduleHide() } else { cancelHideTimer() }
@@ -183,8 +197,9 @@ final class EdgePanelController {
         }
     }
 
-    func hide() {
-        if !isShown || approvalPending { return }
+    /// `force` (the Close button) hides even when a permission has it pinned open.
+    func hide(force: Bool = false) {
+        if !isShown || (approvalPending && !force) { return }
         isShown = false
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.22
@@ -198,7 +213,33 @@ final class EdgePanelController {
         })
     }
 
-    func toggle() { isShown ? hide() : reveal() }
+    func toggle() { isShown ? hide(force: true) : reveal() }
+
+    /// The Close (✕) button: hide now — even if a permission has it pinned — and don't
+    /// hover-reveal again until the cursor has left the edge, so it actually goes away.
+    func dismiss() {
+        revealSuppressed = true
+        cancelHideTimer()
+        cancelDwell()
+        hide(force: true)
+    }
+
+    /// Reveal only after the cursor RESTS at the edge for `revealDwell` — an incidental graze
+    /// (flicking to a scrollbar / close button / hot corner) never pops the panel.
+    private func scheduleReveal() {
+        if isShown || dwellTimer != nil { return }
+        dwellTimer = Timer.scheduledTimer(withTimeInterval: revealDwell, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.dwellTimer = nil
+                guard let f = self.targetScreen()?.frame else { return }
+                let p = NSEvent.mouseLocation
+                let stillAtEdge = p.y >= f.minY && p.y <= f.maxY && p.x >= f.maxX - self.revealHotZone
+                if stillAtEdge && self.hoverEnabled && !self.revealSuppressed { self.reveal() }
+            }
+        }
+    }
+    private func cancelDwell() { dwellTimer?.invalidate(); dwellTimer = nil }
 
     private func scheduleHide() {
         guard hideTimer == nil, !approvalPending else { return }

@@ -59,6 +59,8 @@ final class EdgePanelState: ObservableObject {
     @Published var pending: PendingPermission?
     /// Bridges to the window controller: true → lock open + auto-reveal.
     var onApprovalChange: ((Bool) -> Void)?
+    /// The panel's Close (✕) button → slide the panel away (even if a permission pinned it).
+    var onDismissRequest: (() -> Void)?
     /// Autonomous mode (toggled from the phone): auto-allow every permission so a
     /// session runs hands-off. Persisted so it survives a restart.
     @Published var autoApprove = UserDefaults.standard.bool(forKey: "edgepanel.autoApprove")
@@ -577,7 +579,7 @@ final class EdgePanelState: ObservableObject {
 
     func setPushToken(kind: String, sessionId: String?, token: String) {
         switch kind {
-        case "activity":  if let sid = sessionId { activityPushTokens[sid] = token }
+        case "activity":  if let sid = sessionId { activityPushTokens[sid] = token; lastActivityTokenAt = Date() }
         case "device":    devicePushToken = token
         case "starttoken": pushToStartToken = token
         default:          break
@@ -588,6 +590,10 @@ final class EdgePanelState: ObservableObject {
 
     private var lastPushedWorkingIds: Set<String> = []
     private var lastAggregatePush = Date.distantPast
+    /// When the phone last re-sent its Live Activity token. The app re-sends it every poll
+    /// (~1.5s) while foreground, so a recent value means the app is actively driving an Island
+    /// (use its update token); a stale value means it's closed/suspended (push-to-start instead).
+    private var lastActivityTokenAt = Date.distantPast
 
     /// Push the aggregate Live Activity state to the phone via APNs so the Dynamic
     /// Island ends/updates seamlessly even when the app is suspended or fully closed.
@@ -609,23 +615,41 @@ final class EdgePanelState: ObservableObject {
         // the next prompt never re-popped the Island while the app was closed.)
         if lastPushedWorkingIds.isEmpty && !working.isEmpty { startPushPending = false }
 
-        // Work ended with no live activity to push to → reset so a fresh start fires next time.
-        if working.isEmpty && activityPushTokens["edgepanel"] == nil {
-            lastPushedWorkingIds = []; startPushPending = false; return
+        // The phone re-sends its activity token every poll (~1.5s) ONLY while foreground. A recent
+        // one means the app is actively driving the Island. A token from a push-STARTED Island is
+        // vended once (via iOS's brief background launch) and stays valid for that Island's life —
+        // so we must NOT drop it just because the app went quiet, or we'd never be able to END it.
+        let appForeground = activityPushTokens["edgepanel"] != nil
+            && Date().timeIntervalSince(lastActivityTokenAt) < 6
+        let newWorkSession = lastPushedWorkingIds.isEmpty && !working.isEmpty   // idle → working
+
+        // ONLY at the start of a new work session, if the app isn't foreground, a lingering token
+        // is a leftover whose Island iOS already reaped (updating it just no-ops → "I have to open
+        // the app to see the Island"). Drop it so we push-start a fresh one. During a running turn
+        // we NEVER drop the token, so the two-step "end" below can always fire → the Island stops.
+        if newWorkSession && !appForeground && activityPushTokens["edgepanel"] != nil {
+            activityPushTokens["edgepanel"] = nil
+            savePushTokens()
         }
 
-        // No per-activity token (app not running) but work just began → PUSH-TO-START
-        // so the Island pops up on its own. Once per work session (until the app sends
-        // a real activity token or work ends).
+        // Work running and we hold NO live Island token → PUSH-TO-START so the Island pops up on
+        // its own, even fully closed. Once per work session (re-armed on the next idle→working).
         if !working.isEmpty, activityPushTokens["edgepanel"] == nil, let st = pushToStartToken, !startPushPending {
             startPushPending = true
-            lastPushedWorkingIds = ids; lastAggregatePush = Date()
+            lastPushedWorkingIds = ids; lastAggregatePush = Date(); savePushTokens()
+            NSLog("EdgePanel PUSH-TO-START (app closed) → popping Island for \(ids.count) session(s)")
             APNsPusher.shared.pushStart(token: st, contentState: aggregateState(working), attributes: ["id": "edgepanel"])
             return
         }
 
+        // Work ended and we have no Island token (push-start's token never came back) → nothing to
+        // end; reset so a clean start fires next time. The Island self-freezes + ntfy covers "done".
+        if working.isEmpty && activityPushTokens["edgepanel"] == nil {
+            lastPushedWorkingIds = []; startPushPending = false; return
+        }
+
         guard let token = activityPushTokens["edgepanel"] else { lastPushedWorkingIds = ids; return }
-        startPushPending = false                       // the app has a live activity now
+        if appForeground { startPushPending = false }  // the app itself is driving a live activity
         // A new turn started → cancel any pending "end" so we don't tear down the Island
         // that's now live again (the deferred end below could otherwise fire mid-turn).
         if !working.isEmpty { pendingEndTask?.cancel(); pendingEndTask = nil }
@@ -639,6 +663,7 @@ final class EdgePanelState: ObservableObject {
             // docs). update(done) → hold → end(done)+dismissal, then release the token.
             let detail = lastFinishedDetail ?? "finished"
             let doneState: [String: Any] = ["sessions": [[String: Any]](), "done": true, "doneDetail": detail]
+            NSLog("EdgePanel ISLAND END: update(done) now → end in 6.5s (Island stops counting)")
             APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState)
             pendingEndTask?.cancel()
             pendingEndTask = Task { [weak self] in
@@ -647,6 +672,7 @@ final class EdgePanelState: ObservableObject {
                       self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
                       self.activityPushTokens["edgepanel"] == token // …and the same activity
                 else { return }
+                NSLog("EdgePanel ISLAND END: end event sent → Island dismissed")
                 APNsPusher.shared.pushActivity(token: token, event: "end", contentState: doneState)
                 self.activityPushTokens["edgepanel"] = nil   // ended → allow a fresh push-to-start next time
                 self.savePushTokens()
@@ -664,7 +690,7 @@ final class EdgePanelState: ObservableObject {
              "prompt": sn.promptText.map { String($0.prefix(80)) } ?? "working…",
              "startEpoch": sn.promptAt?.timeIntervalSince1970 ?? Date().timeIntervalSince1970,
              "tokens": sn.turnTokens, "agents": sn.runningAgents, "queued": sn.queuedPrompts,
-             "freezeAt": freezeAt]
+             "activity": sn.activity ?? "", "freezeAt": freezeAt]
         }
         return ["sessions": sessions, "done": false]
     }
