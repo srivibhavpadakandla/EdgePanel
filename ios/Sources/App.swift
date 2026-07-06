@@ -64,10 +64,16 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     // can't suppress alerts when you actually need them.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        // Suppress a permission/question banner — LOCAL (syncPermission/syncQuestion, trigger nil)
-        // OR remote APNs — when the in-app card already surfaced it: the card is the actionable
-        // surface, the banner is a redundant double-alert. (Checked BEFORE the trigger type, since
-        // the local perm/question notifs also have an on-screen equivalent, unlike usage/forecast.)
+        // LOCAL notifications (syncPermission/syncQuestion + usage/forecast, trigger == nil) ALWAYS
+        // banner: they ARE the reliable on-screen surface. The in-app PermissionCard only exists on
+        // the Usage tab inside a ScrollView, so it may be off-screen (Chat tab / scrolled away) — a
+        // silent permission would block Claude with nothing visible. Only de-dup a REMOTE APNs push
+        // that the LAN poll already surfaced in-app (that path DID double-alert). (Do NOT fold local
+        // notifs into the dedup — syncPermission sets surfacedPermId + posts the local notif with the
+        // same permId, so it would suppress its own banner.)
+        guard notification.request.trigger is UNPushNotificationTrigger else {
+            completionHandler([.banner, .sound]); return
+        }
         let info = notification.request.content.userInfo
         let am = ActivityManager.shared
         if let pid = info["permId"] as? String, pid == am.surfacedPermId || am.wasRecentlySurfaced(perm: pid) {
@@ -76,9 +82,6 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
         if let qid = info["questionId"] as? String, qid == am.surfacedQuestionId || am.wasRecentlySurfaced(question: qid) {
             completionHandler([]); return
         }
-        // Anything else — a not-yet-surfaced permission/question (e.g. phone off-LAN so /snapshot
-        // never delivered the card → this push is the only actionable surface), or a usage/forecast
-        // local with no on-screen equivalent — banners.
         completionHandler([.banner, .sound])
     }
 

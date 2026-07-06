@@ -31,8 +31,12 @@ public enum RiskEngine {
         // verb — so a tool like `mcp__fs__delete_file` carrying {"path":…} is NOT downgraded to
         // .read by the filePath branch below and silently auto-allowed. This MUST precede the
         // filePath branch. (Mirrors ToolRisk.classify's destructive-before-read ordering.)
-        if bare.contains("delete") || bare.contains("remove") || bare.contains("destroy") || bare.contains("drop")
-            || bare.contains("deploy") || bare.contains("publish") || bare.contains("kill") {
+        // Match on WORD/`_` boundaries, not raw substring, so `select_dropdown` / `drag_and_drop` /
+        // `Skill`(→kill) aren't mislabeled danger. "drop" is intentionally omitted (too ambiguous —
+        // dropdown/backdrop; a dangerous SQL/DB `drop` is caught at the command level, not the name).
+        let destructiveVerbs: Set<String> = ["delete", "remove", "destroy", "deploy", "publish", "kill"]
+        let nameTokens = Set(bare.split(whereSeparator: { !$0.isLetter }).map(String.init))
+        if !nameTokens.isDisjoint(with: destructiveVerbs) {
             return RiskAssessment(level: .danger, reason: "destructive action", alwaysDangerous: true)
         }
         if let path = filePath ?? event?.filePath {
@@ -147,13 +151,15 @@ public enum RiskEngine {
     private static func gitSubcommand(_ cmd: String) -> String? {
         let toks = cmd.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
         guard let gi = toks.firstIndex(of: "git") else { return nil }
-        let valueOpts: Set<String> = ["-c", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]
+        // git's value-taking global opts (each consumes the NEXT token). `cmd` is already lowercased
+        // by the caller, so `-C` (change-dir) arrives as `-c` and is covered here too.
+        let valueOpts: Set<String> = ["-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]
         var i = gi + 1
         while i < toks.count {
             let t = toks[i]
-            if t == "-C" || valueOpts.contains(t) { i += 2; continue }   // option + its separate value token
-            if t.hasPrefix("-") { i += 1; continue }                     // attached-value (--x=y) or bare flag
-            return t                                                     // first non-option token = the subcommand
+            if valueOpts.contains(t) { i += 2; continue }   // option + its separate value token
+            if t.hasPrefix("-") { i += 1; continue }        // attached-value (--x=y) or bare flag
+            return t                                        // first non-option token = the subcommand
         }
         return nil
     }
@@ -162,10 +168,12 @@ public enum RiskEngine {
         let cmd = raw.lowercased()
         let leaders = commandLeaders(cmd)
 
-        // Pipe-to-shell/interpreter — the classic remote-exec footgun. ANY pipe into a shell OR a
-        // scripting interpreter that runs stdin executes arbitrary fetched/decoded/generated code
-        // (curl|sh, base64 -d|sh, curl x.py|python, …|node|ruby|perl|php), so flag the pipe itself.
-        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh|python3?|node|ruby|perl|php)\b"#, options: .regularExpression) != nil {
+        // Pipe-to-shell/interpreter — the classic remote-exec footgun. A pipe into a shell or an
+        // interpreter that runs stdin AS CODE executes arbitrary fetched/decoded code (curl|sh,
+        // base64 -d|sh, curl x.py|python, …|node|ruby, bash -s). The negative lookaheads exclude the
+        // interpreter processing stdin as DATA — `-m <module>`, `-l` (lint), or a script-file arg
+        // (python -m json.tool, php -l, ruby foo.rb) — which are common and benign.
+        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh|python3?|node|ruby|perl|php)\b(?!\s+-(m|l)\b)(?!\s+[^\s|;&<>]*\.[a-z])"#, options: .regularExpression) != nil {
             return red("pipes into a shell/interpreter", always: true)
         }
         // Fork bomb / disk wipe.

@@ -209,8 +209,12 @@ final class EditorInjector: @unchecked Sendable {
         var r: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r) == .success,
               let role = r as? String else { return true }
-        let leaveAlone: Set<String> = [kAXTextAreaRole as String, kAXTextFieldRole as String, "AXComboBox",
-                                       "AXGroup", "AXWebArea", "AXScrollArea", "AXUnknown"]
+        // NB: deliberately NOT including AXScrollArea (the editor's integrated TERMINAL is a scroll
+        // area — a paste+Return there would RUN as a shell command) or AXUnknown (ambiguous). Those
+        // get the corrective toggle back to the chat input. Only the webview chat-input container
+        // roles are left alone.
+        let leaveAlone: Set<String> = [kAXTextAreaRole as String, kAXTextFieldRole as String,
+                                       "AXComboBox", "AXGroup", "AXWebArea"]
         return leaveAlone.contains(role)
     }
 
@@ -218,6 +222,11 @@ final class EditorInjector: @unchecked Sendable {
     /// MUST be called off the main thread.
     @discardableResult
     func interrupt() -> Bool {
+        // Serialize with injections (shared keyboard focus) so Stop's Cmd+Esc/Esc can't interleave
+        // with a different-session inject's paste/submit. BOUNDED wait (2s) so Stop stays responsive
+        // even if an inject is mid-flight — best-effort past the deadline rather than hang.
+        let gotLock = Self.injectLock.lock(before: Date().addingTimeInterval(2))
+        defer { if gotLock { Self.injectLock.unlock() } }
         let found: Bool = onMain {
             guard let app = self.runningEditor() else { return false }
             app.activate(options: [.activateIgnoringOtherApps]); return true

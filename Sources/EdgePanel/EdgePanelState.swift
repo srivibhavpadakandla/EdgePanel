@@ -507,27 +507,23 @@ final class EdgePanelState: ObservableObject {
 
     static func buildPreview(_ event: HookEvent) -> [PreviewLine] {
         let maxLines = 6
-        // Only the first few lines are ever shown, so cap each field to a few KB BEFORE running the
-        // secret-redaction regexes — otherwise an 8 MB Write/content body regex-scans on the MainActor.
-        func cap(_ s: String) -> String { s.count > 8_000 ? String(s.prefix(8_000)) : s }
-        let redact: (String) -> String = { redactSecrets(cap($0)) }
-        if let old = event.oldString.map(redact), let new = event.newString.map(redact) {
-            var lines: [PreviewLine] = []
-            for l in old.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines / 2) {
-                lines.append(PreviewLine(kind: .removed, text: String(l)))
-            }
-            for l in new.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines / 2) {
-                lines.append(PreviewLine(kind: .added, text: String(l)))
-            }
-            return lines
+        // Cap the field first (bounds the split — an 8 MB body must not split/scan on the MainActor),
+        // then redact EACH shown line individually so a secret can't be partially exposed by whole-
+        // field cap-then-redact straddling the boundary. Whole-line redaction catches any secret
+        // within a line (secrets contain no newline).
+        func shownLines(_ s: String, _ take: Int) -> [String] {
+            let capped = s.count > 8_000 ? String(s.prefix(8_000)) : s
+            return capped.split(separator: "\n", omittingEmptySubsequences: false).prefix(take).map { redactSecrets(String($0)) }
         }
-        if let content = event.content.map(redact) {
-            return content.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
-                .map { PreviewLine(kind: .added, text: String($0)) }
+        if let old = event.oldString, let new = event.newString {
+            return shownLines(old, maxLines / 2).map { PreviewLine(kind: .removed, text: $0) }
+                 + shownLines(new, maxLines / 2).map { PreviewLine(kind: .added, text: $0) }
         }
-        if let cmd = event.command.map(redact) {
-            return cmd.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
-                .map { PreviewLine(kind: .context, text: String($0)) }
+        if let content = event.content {
+            return shownLines(content, maxLines).map { PreviewLine(kind: .added, text: $0) }
+        }
+        if let cmd = event.command {
+            return shownLines(cmd, maxLines).map { PreviewLine(kind: .context, text: $0) }
         }
         if let path = event.filePath { return [PreviewLine(kind: .context, text: path)] }
         return []
@@ -687,8 +683,15 @@ final class EdgePanelState: ObservableObject {
             pendingEndTask?.cancel()
             pendingEndTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly on the Island
-                guard let self, !Task.isCancelled,
-                      self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
+                guard let self, !Task.isCancelled else { return }
+                // Clear OUR OWN handle when this task finishes — whether it sends the end OR bails
+                // because the phone rotated the Island's token during the hold window. Leaving it
+                // non-nil made the `pendingEndTask == nil` drop-guard block the NEXT turn's stale-token
+                // drop → the "must open the app to see the Island" bug recurred for one turn. Safe:
+                // everything here runs on the @MainActor so no new turn can reassign it mid-body, and
+                // the isCancelled re-check means a turn that cancelled+replaced us keeps its handle.
+                defer { if !Task.isCancelled { self.pendingEndTask = nil } }
+                guard self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
                       self.activityPushTokens["edgepanel"] == token // …and the same activity
                 else { return }
                 NSLog("EdgePanel ISLAND END: end event sent → Island dismissed")

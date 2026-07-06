@@ -89,7 +89,7 @@ final class ChatRunner: @unchecked Sendable {
             // close-once guard keeps the watchdog and the normal post-loop cleanup from both
             // closing the dup.
             let outFD = dup(out.fileHandleForReading.fileDescriptor)
-            let closeLock = NSLock(); var outClosed = false
+            let closeLock = NSLock(); var outClosed = false; var readDone = false
             func closeOutOnce() {
                 closeLock.lock(); let already = outClosed; outClosed = true; closeLock.unlock()
                 if !already, outFD >= 0 { close(outFD) }
@@ -99,12 +99,14 @@ final class ChatRunner: @unchecked Sendable {
             // Escape hatch (mirrors the stderr one): once claude EXITS, a grandchild that inherited
             // stdout (`npm run dev &`, a spawned server) can keep the pipe open and pin the read loop
             // — the 600s watchdog is far too coarse and holds the session's `resuming` lock the whole
-            // time. Watch for exit on a side thread and close outFD ~1.5s later so the loop unblocks
-            // (read → -1/EBADF) promptly. closeOutOnce is idempotent, so the normal path is unaffected.
+            // time. Watch for exit on a side thread and, ONLY IF the read loop hasn't finished on its
+            // own (`readDone`), close outFD so the loop unblocks (read → -1/EBADF). Gating on readDone
+            // avoids racing a healthily-draining loop's next read against a reused fd number.
             DispatchQueue.global(qos: .utility).async {
                 p.waitUntilExit()
                 usleep(1_500_000)   // let any final buffered stdout drain first
-                closeOutOnce()
+                closeLock.lock(); let stuck = !readDone; closeLock.unlock()
+                if stuck { closeOutOnce() }
             }
             // Drain stderr concurrently (surfaces a real failure reason on the phone). Read via a
             // dup'd POSIX fd so we can CLOSE it to unblock a stuck reader (an orphaned tool child
@@ -169,6 +171,7 @@ final class ChatRunner: @unchecked Sendable {
                 }
             }
             if !buffer.isEmpty { handleLine(buffer) }
+            closeLock.lock(); readDone = true; closeLock.unlock()   // loop finished on its own → side thread must NOT close (fd-reuse race)
             p.waitUntilExit()
             watchdog.cancel()
             closeOutOnce()   // reclaim our dup'd stdout fd in the normal path (watchdog may not have fired)
@@ -230,7 +233,11 @@ final class ChatRunner: @unchecked Sendable {
                 // terminate a process); the watch loop is the only place that can honor it —
                 // without this, Stop returned "success" but the loop spun to maxRuntime (600s).
                 if self.isCancelled(jid) {
-                    DispatchQueue.global().async { EditorInjector.shared.interrupt() }
+                    // Interrupt SYNCHRONOUSLY, BEFORE finish() releases the session's `resuming` lock —
+                    // otherwise a new same-session inject could start and interleave keystrokes with the
+                    // still-running interrupt. interrupt() also takes injectLock (bounded), so it can't
+                    // interleave with a different-session inject either.
+                    EditorInjector.shared.interrupt()
                     self.finish(jid, Job(status: "done", result: lastText, sessionId: sessionId)); return
                 }
                 // Take the reply that comes AFTER our injected prompt (the last user message),
