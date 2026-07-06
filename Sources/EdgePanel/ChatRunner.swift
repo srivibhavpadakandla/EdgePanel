@@ -96,6 +96,16 @@ final class ChatRunner: @unchecked Sendable {
             }
             let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; closeOutOnce() }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
+            // Escape hatch (mirrors the stderr one): once claude EXITS, a grandchild that inherited
+            // stdout (`npm run dev &`, a spawned server) can keep the pipe open and pin the read loop
+            // — the 600s watchdog is far too coarse and holds the session's `resuming` lock the whole
+            // time. Watch for exit on a side thread and close outFD ~1.5s later so the loop unblocks
+            // (read → -1/EBADF) promptly. closeOutOnce is idempotent, so the normal path is unaffected.
+            DispatchQueue.global(qos: .utility).async {
+                p.waitUntilExit()
+                usleep(1_500_000)   // let any final buffered stdout drain first
+                closeOutOnce()
+            }
             // Drain stderr concurrently (surfaces a real failure reason on the phone). Read via a
             // dup'd POSIX fd so we can CLOSE it to unblock a stuck reader (an orphaned tool child
             // can hold the stderr write-end) — closing returns -1/EBADF, vs the uncatchable Obj-C
@@ -215,6 +225,14 @@ final class ChatRunner: @unchecked Sendable {
             var lastText = "", sawReply = false, stable = 0
             while Date() < deadline {
                 usleep(1_200_000)
+                // Phone Stop / Panic → bail and interrupt the editor's turn. An inject job has NO
+                // Process in `procs`, so cancel()/cancelAll() record intent here (they can't
+                // terminate a process); the watch loop is the only place that can honor it —
+                // without this, Stop returned "success" but the loop spun to maxRuntime (600s).
+                if self.isCancelled(jid) {
+                    DispatchQueue.global().async { EditorInjector.shared.interrupt() }
+                    self.finish(jid, Job(status: "done", result: lastText, sessionId: sessionId)); return
+                }
                 // Take the reply that comes AFTER our injected prompt (the last user message),
                 // not the latest assistant overall — otherwise, if our message QUEUED behind an
                 // in-progress editor turn, we'd stream that turn's reply (which answers the
@@ -239,6 +257,10 @@ final class ChatRunner: @unchecked Sendable {
     }
 
     func poll(_ jid: String) -> Job? { lock.lock(); defer { lock.unlock() }; return jobs[jid] }
+
+    /// Was this job asked to stop? (cancel()/cancelAll() record intent for jobs with no tracked
+    /// Process — e.g. an editor-inject job — for the watch loop to honor.)
+    private func isCancelled(_ jid: String) -> Bool { lock.lock(); defer { lock.unlock() }; return cancelIntent.contains(jid) }
 
     /// Stop a running turn (from the phone). Terminating the process EOFs its pipe, so
     /// the read loop finishes and reports whatever streamed so far + a "stopped" note.

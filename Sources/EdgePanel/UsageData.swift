@@ -136,21 +136,25 @@ func contextLimit(for model: String) -> Int {
 
 // MARK: - Data model
 
+/// Saturating add — a corrupt/hostile transcript with Int.max token fields must not overflow-TRAP
+/// the whole summary aggregation. Clamps to Int.max instead of crashing.
+func satAdd(_ a: Int, _ b: Int) -> Int { let (s, o) = a.addingReportingOverflow(b); return o ? Int.max : s }
+
 struct Rec {
     let date: Date
     let model: String
     let inT, outT, cacheW, cacheR: Int
     let cost: Double
-    var tokens: Int { inT + outT + cacheW + cacheR }
-    var billable: Int { inT + outT + cacheW }
+    var tokens: Int { satAdd(satAdd(inT, outT), satAdd(cacheW, cacheR)) }
+    var billable: Int { satAdd(satAdd(inT, outT), cacheW) }
 }
 
 struct Bucket {
     var cost = 0.0, inT = 0, outT = 0, cacheW = 0, cacheR = 0, tokens = 0
-    var billable: Int { inT + outT + cacheW }
+    var billable: Int { satAdd(satAdd(inT, outT), cacheW) }
     mutating func add(_ r: Rec) {
-        cost += r.cost; inT += r.inT; outT += r.outT
-        cacheW += r.cacheW; cacheR += r.cacheR; tokens += r.tokens
+        cost += r.cost; inT = satAdd(inT, r.inT); outT = satAdd(outT, r.outT)
+        cacheW = satAdd(cacheW, r.cacheW); cacheR = satAdd(cacheR, r.cacheR); tokens = satAdd(tokens, r.tokens)
     }
 }
 
@@ -235,7 +239,7 @@ enum UsageLoader {
 
     static func parseFile(_ url: URL, into recs: inout [Rec], seen: inout Set<String>) {
         guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return }
+              let text = Optional(String(decoding: data, as: UTF8.self)) else { return }
         for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let obj = (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any],
                   let msg = obj["message"] as? [String: Any],
@@ -243,10 +247,10 @@ enum UsageLoader {
                   let ts = obj["timestamp"] as? String,
                   let date = parseDate(ts) else { continue }
 
-            let inT = usage["input_tokens"] as? Int ?? 0
-            let outT = usage["output_tokens"] as? Int ?? 0
-            let cacheW = usage["cache_creation_input_tokens"] as? Int ?? 0
-            let cacheR = usage["cache_read_input_tokens"] as? Int ?? 0
+            let inT = max(0, usage["input_tokens"] as? Int ?? 0)   // clamp: a negative/garbage count is nonsense
+            let outT = max(0, usage["output_tokens"] as? Int ?? 0)
+            let cacheW = max(0, usage["cache_creation_input_tokens"] as? Int ?? 0)
+            let cacheR = max(0, usage["cache_read_input_tokens"] as? Int ?? 0)
             if inT == 0 && outT == 0 && cacheW == 0 && cacheR == 0 { continue }
 
             // Dedup by message/request id; fall back to a synthetic key (timestamp +
@@ -367,7 +371,7 @@ enum UsageLoader {
         }
         guard let pick = newest,
               let data = try? Data(contentsOf: pick.url),
-              let text = String(data: data, encoding: .utf8) else { return nil }
+              let text = Optional(String(decoding: data, as: UTF8.self)) else { return nil }
 
         var lastInput = 0, model = "claude"
         for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -452,6 +456,7 @@ struct LiveSession: Identifiable {
     var isEditor: Bool = false  // a GUI editor session (claude-vscode/desktop) you're watching → excluded from the Island
     var modeKey: String = "ask"     // this chat's permission mode (ask|edit|plan|auto|bypass)
     var effortKey: String = ""      // this chat's reasoning effort (low|medium|high|xhigh|max|"")
+    var activity: String? = nil     // what it's doing RIGHT NOW (latest unresolved tool_use), e.g. "Editing Chat.swift"
     /// Still generating: you prompted and the turn hasn't finished (no end_turn
     /// yet — covers long tool calls), and the transcript is recent enough not to
     /// be an abandoned/crashed turn.
@@ -537,13 +542,20 @@ extension UsageLoader {
             // records (ai-title, mode, last-prompt) that would otherwise make an
             // idle, already-answered session look like it's still working.
             var lastTerminalAssistant = -1
+            var lastAssistantIdx = -1
             for (i, o) in objs.enumerated() {
-                guard (o["type"] as? String) == "assistant",
-                      let m = o["message"] as? [String: Any],
-                      let sr = m["stop_reason"] as? String else { continue }
+                guard (o["type"] as? String) == "assistant" else { continue }
+                lastAssistantIdx = i
+                guard let m = o["message"] as? [String: Any], let sr = m["stop_reason"] as? String else { continue }
                 if sr == "end_turn" || sr == "stop_sequence" || sr == "max_tokens" { lastTerminalAssistant = i }
             }
-            let turnComplete = boundary < 0 || lastTerminalAssistant > boundary
+            // boundary < 0 means this turn's user prompt scrolled OUT of the 6 MB tail window (a heavy
+            // agentic turn). Do NOT blindly call that complete — it fired spurious "finished" pushes
+            // mid-turn. Judge by the tail instead: complete only if the LAST assistant record is a
+            // terminal one; a trailing tool_use / streaming assistant (or no assistant yet) = working.
+            let turnComplete = boundary < 0
+                ? (lastTerminalAssistant >= 0 && lastTerminalAssistant >= lastAssistantIdx)
+                : lastTerminalAssistant > boundary
 
             // Live "proof of work" signals for the current turn:
             //  • runningAgents = Task subagents spawned this turn whose tool_result hasn't
@@ -555,14 +567,18 @@ extension UsageLoader {
             // sits AFTER the assistant's Task tool_use calls, so scanning from it would miss
             // the very subagents we're counting.
             var taskIds = Set<String>(), resolvedIds = Set<String>()
+            // Every tool_use this turn, in order, so we can name the latest UNRESOLVED one
+            // as "what Claude is doing right now" (its tool_result hasn't come back yet).
+            var toolUses: [(id: String, block: [String: Any])] = []
             let agentScanStart = lastTerminalAssistant + 1
             if agentScanStart < objs.count {
                 for o in objs[agentScanStart...] {
                     let type = o["type"] as? String
                     if type == "assistant", let m = o["message"] as? [String: Any],
                        let content = m["content"] as? [[String: Any]] {
-                        for b in content where (b["type"] as? String) == "tool_use" && (b["name"] as? String) == "Task" {
-                            if let id = b["id"] as? String { taskIds.insert(id) }
+                        for b in content where (b["type"] as? String) == "tool_use" {
+                            if (b["name"] as? String) == "Task", let id = b["id"] as? String { taskIds.insert(id) }
+                            toolUses.append((id: (b["id"] as? String) ?? "", block: b))
                         }
                     } else if type == "user", let m = o["message"] as? [String: Any],
                               let content = m["content"] as? [[String: Any]] {
@@ -573,6 +589,12 @@ extension UsageLoader {
                 }
             }
             let runningAgents = turnComplete ? 0 : taskIds.subtracting(resolvedIds).count
+            // Current activity = the most recent tool_use still awaiting a result. If every tool
+            // call has resolved (or the turn ended), it's thinking/writing, so leave it nil.
+            var activity: String? = nil
+            if !turnComplete, let live = toolUses.last(where: { $0.id.isEmpty || !resolvedIds.contains($0.id) }) {
+                activity = Self.activityLabel(live.block)
+            }
             var typedTexts: [String] = []
             for (i, o) in objs.enumerated() where i > lastTerminalAssistant {
                 if let t = userPromptText(o) { typedTexts.append(t) }
@@ -609,7 +631,7 @@ extension UsageLoader {
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
                                    runningAgents: runningAgents, queuedPrompts: queuedPrompts,
                                    queuedTexts: queuedTexts, isEditor: isEditor,
-                                   modeKey: modeKey, effortKey: effortKey))
+                                   modeKey: modeKey, effortKey: effortKey, activity: activity))
         }
         return out
     }
@@ -722,7 +744,7 @@ extension UsageLoader {
         guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? fh.close() }
         let data = (try? fh.read(upToCount: 65536)) ?? Data()
-        guard let text = String(data: data, encoding: .utf8) else { return false }
+        guard let text = Optional(String(decoding: data, as: UTF8.self)) else { return false }
         for line in text.split(separator: "\n", omittingEmptySubsequences: true).prefix(40) {
             if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
                let ep = o["entrypoint"] as? String, !ep.isEmpty {
@@ -771,7 +793,7 @@ extension UsageLoader {
         }
         guard let pick = newest,
               let data = try? Data(contentsOf: pick.url),
-              let text = String(data: data, encoding: .utf8) else { return [] }
+              let text = Optional(String(decoding: data, as: UTF8.self)) else { return [] }
 
         var project = "session"
         var out: [ToolEvent] = []
@@ -800,6 +822,43 @@ extension UsageLoader {
             }
         }
         return Array(out.suffix(limit).reversed())   // newest first
+    }
+
+    /// A short present-tense label for what a single tool_use is doing right now,
+    /// e.g. "Editing Chat.swift" / "Running npm test" / "Searching the code".
+    /// Used for the live "doing now" line under a working session.
+    static func activityLabel(_ block: [String: Any]) -> String {
+        let raw = block["name"] as? String ?? "tool"
+        let name = raw.hasPrefix("mcp__") ? (raw.components(separatedBy: "__").last ?? raw) : raw
+        let n = name.lowercased()
+        let input = block["input"] as? [String: Any] ?? [:]
+        let fp = (input["file_path"] as? String) ?? (input["path"] as? String) ?? (input["notebook_path"] as? String)
+        let file = fp.map { ($0 as NSString).lastPathComponent }
+        if n == "todowrite" { return "Planning the next steps" }   // before "write" (todoWRITE) catches it
+        if n.contains("edit") || n.contains("write") || n.contains("notebook") {
+            return "Editing \(file ?? "a file")"
+        }
+        if n.contains("read") || n == "view" || n == "cat" {
+            return "Reading \(file ?? "a file")"
+        }
+        if n == "bash" || n.contains("shell") || n.contains("exec") || n.contains("terminal") {
+            if let cmd = input["command"] as? String { return "Running \(clip(cleanCommand(cmd), 32))" }
+            return "Running a command"
+        }
+        if n.contains("grep") || n.contains("glob") || n.contains("search") || n.contains("find") {
+            if let pat = input["pattern"] as? String { return "Searching \(clip(pat, 26))" }
+            if let q = input["query"] as? String { return "Searching \(clip(q, 26))" }
+            return "Searching the code"
+        }
+        if n == "task" || n.contains("agent") {
+            if let d = input["description"] as? String { return "Delegating: \(clip(d, 28))" }
+            return "Running a subagent"
+        }
+        if n.contains("web") || n.contains("fetch") {
+            if let u = input["url"] as? String { return "Browsing \(clip(u, 28))" }
+            return "Browsing the web"
+        }
+        return "Using \(name)"
     }
 
     /// Strip leading env-var assignments and take the first line, so a Bash
@@ -1102,6 +1161,9 @@ extension UsageLoader {
     /// Used by the live-inject watcher to know when an injected message's reply is complete.
     /// Returns true when the file can't be read (treat unknown as "not generating").
     static func sessionTurnComplete(sessionId: String, cwd: String = "") -> Bool {
+        // Same guard as sessionFileURL: a session id is a UUID (hex + dashes). Reject anything else
+        // so a caller can't build a traversal path (base/encoded/../../… .jsonl) out of sessionId.
+        guard !sessionId.isEmpty, sessionId.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return true }
         let base = projectsBase()
         var url: URL?
         if !cwd.isEmpty {
@@ -1143,11 +1205,14 @@ extension UsageLoader {
         guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? fh.close() }
         let data = (try? fh.read(upToCount: 131072)) ?? Data()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        guard let text = Optional(String(decoding: data, as: UTF8.self)) else { return nil }
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             if let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
                let cwd = o["cwd"] as? String, !cwd.isEmpty {
-                headCwdLock.lock(); headCwdCache[id] = cwd; headCwdLock.unlock()
+                headCwdLock.lock()
+                if headCwdCache.count > 2000 { headCwdCache.removeAll(keepingCapacity: true) }  // bound: this is an always-on app
+                headCwdCache[id] = cwd
+                headCwdLock.unlock()
                 return cwd
             }
         }
@@ -1172,10 +1237,10 @@ extension UsageLoader {
                 return String(text[text.index(after: nl)...])
             }
             // No newline in the tail window → the final record is a single line larger than
-            // maxBytes (a multi-MB tool_result / pasted blob). The window holds only a
-            // truncated, unparseable fragment, so re-read the whole file (capped) to recover
-            // that record intact instead of returning garbage.
-            if let whole = try? Data(contentsOf: url), whole.count <= 64_000_000 {
+            // maxBytes (a multi-MB tool_result / pasted blob). Recover it by re-reading, but CAP
+            // the recovery (16 MB, was 64 MB) so a pathological transcript can't force a huge read
+            // on every 2 s scan; past the cap we give up (return nil) rather than burn CPU/IO.
+            if let whole = try? Data(contentsOf: url), whole.count <= 16_000_000 {
                 return String(decoding: whole, as: UTF8.self)
             }
             return nil

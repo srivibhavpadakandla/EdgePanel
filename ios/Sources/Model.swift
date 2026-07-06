@@ -101,6 +101,76 @@ struct EdgeSnapshot: Codable {
     }
 }
 
+// MARK: - Lenient decoding
+// Swift's synthesized Decodable IGNORES property defaults and throws `keyNotFound` on ANY missing
+// non-optional key — so the slightest Mac↔phone schema skew, or a partial/error snapshot, would
+// fail the whole decode and blank the dashboard ("Connecting…" forever though the Mac is reachable).
+// These decoders fall back to each field's default instead, and DROP (not reject) a malformed array
+// element. Defined in extensions so the synthesized memberwise inits are preserved.
+
+private struct EPLossy<T: Decodable>: Decodable { let v: T?; init(from d: Decoder) throws { v = try? T(from: d) } }
+private extension KeyedDecodingContainer {
+    func g<T: Decodable>(_ k: Key, _ def: T) -> T { (try? decode(T.self, forKey: k)) ?? def }   // missing/null/mismatch → default
+    func g<T: Decodable>(_ k: Key) -> T? { try? decode(T.self, forKey: k) }                       // optional field → nil
+    func arr<T: Decodable>(_ k: Key) -> [T] { ((try? decode([EPLossy<T>].self, forKey: k)) ?? []).compactMap(\.v) }
+    func arrOpt<T: Decodable>(_ k: Key) -> [T]? { contains(k) ? ((try? decode([EPLossy<T>].self, forKey: k)) ?? []).compactMap(\.v) : nil }
+}
+
+extension EdgeSnapshot {
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        generatedAt = c.g(.generatedAt, 0); plan = c.g(.plan); spend = c.g(.spend, Spend(fiveHourUSD: 0))
+        working = c.arr(.working); chats = c.arr(.chats); calendar = c.arr(.calendar)
+        pending = c.g(.pending); question = c.g(.question); autoApprove = c.g(.autoApprove)
+        mode = c.g(.mode); effort = c.g(.effort); mascotAnim = c.g(.mascotAnim); promptHistory = c.arrOpt(.promptHistory)
+        editorSessionId = c.g(.editorSessionId); editorCwd = c.g(.editorCwd); editorProject = c.g(.editorProject)
+    }
+}
+extension EdgeSnapshot.PromptItem {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        id = c.g(.id, id); text = c.g(.text, ""); atEpoch = c.g(.atEpoch, 0); project = c.g(.project, "") }
+}
+extension EdgeSnapshot.PlanInfo {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        fiveHourPct = c.g(.fiveHourPct, 0); weekPct = c.g(.weekPct, 0)
+        fiveHourResetEpoch = c.g(.fiveHourResetEpoch); weekResetEpoch = c.g(.weekResetEpoch)
+        burnPerHour = c.g(.burnPerHour); limitClockEpoch = c.g(.limitClockEpoch) }
+}
+extension EdgeSnapshot.Spend {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(); fiveHourUSD = c.g(.fiveHourUSD, 0) }
+}
+extension EdgeSnapshot.Working {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        id = c.g(.id, id); project = c.g(.project, ""); cwd = c.g(.cwd, "")
+        model = c.g(.model); prompt = c.g(.prompt); promptSummary = c.g(.promptSummary); promptAtEpoch = c.g(.promptAtEpoch)
+        turnTokens = c.g(.turnTokens, 0); runningAgents = c.g(.runningAgents, 0); queuedPrompts = c.g(.queuedPrompts, 0)
+        queuedTexts = c.arr(.queuedTexts); modeKey = c.g(.modeKey, "ask"); effortKey = c.g(.effortKey, "")
+        isEditor = c.g(.isEditor, false); activity = c.g(.activity) }
+}
+extension EdgeSnapshot.Chat {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        id = c.g(.id, id); name = c.g(.name, ""); project = c.g(.project, ""); cwd = c.g(.cwd); lastActiveEpoch = c.g(.lastActiveEpoch, 0) }
+}
+extension EdgeSnapshot.CalDay {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(); day = c.g(.day, 0); tokens = c.g(.tokens, 0) }
+}
+extension EdgeSnapshot.Pending {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        id = c.g(.id, id); tool = c.g(.tool, ""); summary = c.g(.summary, ""); reason = c.g(.reason, "")
+        risk = c.g(.risk, "read"); project = c.g(.project); preview = c.arr(.preview); allowRule = c.g(.allowRule, "") }
+}
+extension EdgeSnapshot.Question {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        id = c.g(.id, id); project = c.g(.project); items = c.arr(.items) }
+}
+extension EdgeSnapshot.Question.Item {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init()
+        question = c.g(.question, ""); header = c.g(.header, ""); multiSelect = c.g(.multiSelect, false); options = c.arr(.options) }
+}
+extension EdgeSnapshot.Question.Item.Opt {
+    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(); label = c.g(.label, ""); description = c.g(.description) }
+}
+
 @MainActor
 final class EdgeClient: ObservableObject {
     static let shared = EdgeClient()

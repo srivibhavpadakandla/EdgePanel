@@ -13,8 +13,6 @@ final class ActivityManager {
 
     private var aggregate: Activity<WorkingAttributes>?
     private var last: [String: EdgeSnapshot.Working] = [:]   // last-seen working set (for done detail)
-    private var lastPlanPct: Double = 0
-    private var alertedAt: Set<Int> = []   // thresholds already alerted this window
     private var lastPermId: String?        // permission request already surfaced
     private var lastQuestionId: String?    // question already surfaced
     var surfacedPermId: String? { lastPermId }       // for willPresent dedup
@@ -34,6 +32,14 @@ final class ActivityManager {
         recentQuestionIds.contains { $0.0 == id && Date().timeIntervalSince($0.1) <= 120 }
     }
     private var pushTokenTask: Task<Void, Never>?
+    private var updateTask: Task<Void, Never>?   // chains Live-Activity updates so newer content can't land before older
+
+    /// Apply a Live-Activity update AFTER any in-flight one — detached `Task { await act.update }`
+    /// calls have no ordering guarantee, so a slower earlier update could overwrite a newer one.
+    private func serialUpdate(_ act: Activity<WorkingAttributes>, _ content: ActivityContent<WorkingAttributes.ContentState>) {
+        let prev = updateTask
+        updateTask = Task { await prev?.value; await act.update(content) }
+    }
     private var endTask: Task<Void, Never>?   // deferred "done→end" (cancellable if a new turn arrives)
     private var emptyTicks = 0                 // consecutive syncs with no working sessions (done debounce)
     private var pendingDoneDetail: String?     // captured on the first empty tick, used when we finally end
@@ -161,14 +167,18 @@ final class ActivityManager {
         // stops on its own instead of ticking forever once a turn finishes while the
         // app is suspended. While the app is alive each update pushes this forward.
         let freezeAt = Date().addingTimeInterval(90).timeIntervalSince1970
-        let lines = working.map { w in
+        // Dedupe by session id (like WorkingCard / workingRemote do) — a duplicate Identifiable id
+        // in `sessions` breaks the widget's `ForEach(s.sessions.prefix(3))`.
+        var seenIds = Set<String>()
+        let deduped = working.filter { seenIds.insert($0.id).inserted }
+        let lines = deduped.map { w in
             WorkingAttributes.Line(
                 id: w.id, project: w.project, prompt: w.display,
                 startEpoch: w.promptAtEpoch ?? Date().timeIntervalSince1970,
                 tokens: w.turnTokens, agents: w.runningAgents, queued: w.queuedPrompts,
                 activity: w.activity ?? "", freezeAt: freezeAt)
         }
-        last = Dictionary(working.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        last = Dictionary(deduped.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
@@ -221,7 +231,7 @@ final class ActivityManager {
         // Update reuses an active OR stale activity — update transitions stale→active, so a
         // push-started (stale) Island is driven back to life instead of stranded as a duplicate.
         if let act = aggregate, act.activityState == .active || act.activityState == .stale {
-            Task { await act.update(content) }
+            serialUpdate(act, content)
         } else {
             // A genuinely dead/ended aggregate → drop the stale reference + tasks so we don't
             // update a corpse, then re-adopt any still-live activity (active or stale, e.g. a
@@ -232,7 +242,7 @@ final class ActivityManager {
             }
             if let existing = Activity<WorkingAttributes>.activities.first(where: { $0.activityState == .active || $0.activityState == .stale }) {
                 aggregate = existing; observePushToken(existing)
-                Task { await existing.update(content) }
+                serialUpdate(existing, content)
                 return
             }
             // Prefer a push-enabled activity (so the Mac can end it via APNs). Fall
@@ -268,31 +278,6 @@ final class ActivityManager {
         if let hex = lastActivityTokenHex { onPushToken?("activity", "edgepanel", hex) }
     }
 
-    /// Usage guardrail: notify once when crossing 80% / 90% (re-arms on reset).
-    private var forecastAlerted = false
-    func checkUsage(plan: EdgeSnapshot.PlanInfo?) {
-        guard let pct = plan?.fiveHourPct else { return }
-        if pct < lastPlanPct - 5 { alertedAt.removeAll() }   // window reset → re-arm
-        lastPlanPct = pct
-        for threshold in [80, 90] where pct >= Double(threshold) && !alertedAt.contains(threshold) {
-            alertedAt.insert(threshold)
-            notify(title: "⚠︎ \(threshold)% of your 5-hour limit", body: "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
-        }
-        // Forecast: at the current burn rate you'll hit the cap within ~45 min → one
-        // proactive heads-up with the projected time (re-arms when the pace eases).
-        if let hit = plan?.limitClockEpoch {
-            let mins = Date(timeIntervalSince1970: hit).timeIntervalSinceNow / 60
-            // Floor: only forecast once you're actually deep into the window (≥50%), so a
-            // noisy early projection right after a window reset can't fire a false alarm.
-            if mins > 0, mins <= 45, pct >= 50, !forecastAlerted {
-                forecastAlerted = true
-                let t = DateFormatter.localizedString(from: Date(timeIntervalSince1970: hit), dateStyle: .none, timeStyle: .short)
-                notify(title: "⏳ On track to hit your 5-hour cap", body: "At this pace, around \(t). Ease off or pause autonomous tasks.")
-            }
-            if mins > 60 || mins <= 0 { forecastAlerted = false }
-        } else { forecastAlerted = false }
-    }
-
     /// Done detail synthesized from the Live Activity's own last-known line (used when the
     /// finished session was never tracked locally, e.g. after adopting a push-started Island)
     /// — so the "✓ Complete" card shows a real duration + tokens instead of a bare "finished".
@@ -317,10 +302,4 @@ final class ActivityManager {
         return "\(t) · \(fmtTokens(w.turnTokens)) tokens"
     }
 
-    private func notify(title: String, body: String) {
-        let c = UNMutableNotificationContent()
-        c.title = title; c.body = body; c.sound = .default
-        UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
-    }
 }

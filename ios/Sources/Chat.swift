@@ -71,8 +71,12 @@ final class ChatStore: ObservableObject {
         let cwd = t.cwd
         Task {
             let hist = await EdgeClient.shared.fetchHistory(sessionId: resume, cwd: cwd)
+            // Match by id OR sessionId — the SAME rule thread(threadId) used above. Opening a
+            // phone-started task from WORKING NOW passes the real session id, which is the thread's
+            // sessionId (not its stable id); an id-only firstIndex missed it, so that thread never
+            // reconciled against the Mac transcript (dropped turns run on the PC).
             guard !hist.isEmpty, !busy.contains(threadId),
-                  let i = threads.firstIndex(where: { $0.id == threadId }) else { return }
+                  let i = threads.firstIndex(where: { $0.id == threadId || $0.sessionId == threadId }) else { return }
             // A trailing local .error marker ("■ Stopped"/failure) is device-only — the
             // transcript never has it. Exclude it from the "is the device ahead?" comparison
             // so it doesn't inflate the count it's measured against (which would FREEZE future

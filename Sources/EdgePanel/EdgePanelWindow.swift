@@ -177,8 +177,11 @@ final class EdgePanelController {
             cancelHideTimer()
             scheduleReveal()          // dwell first, so an incidental graze doesn't pop it open
         } else if isShown {
-            // Between the edge and `inner - slack` is the dead band: keep open.
-            if wellClear { scheduleHide() } else { cancelHideTimer() }
+            // Between the edge and `inner - slack` is the dead band: keep open. Also hide when the
+            // cursor leaves the target screen's VERTICAL range (flicked off the top/bottom edge while
+            // still in the right-edge band) — `wellClear` only tests x, so without this the panel
+            // could stay open until a leftward move.
+            if wellClear || !onTargetVertically { scheduleHide() } else { cancelHideTimer() }
         }
     }
 
@@ -265,6 +268,8 @@ final class EdgePanelController {
     deinit {
         if let g = globalMonitor { NSEvent.removeMonitor(g) }
         if let l = localMonitor { NSEvent.removeMonitor(l) }
+        hideTimer?.invalidate()   // don't leave scheduled timers on the run loop after teardown
+        dwellTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
 }

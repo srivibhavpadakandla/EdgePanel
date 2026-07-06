@@ -64,12 +64,10 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     // can't suppress alerts when you actually need them.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        guard notification.request.trigger is UNPushNotificationTrigger else {
-            completionHandler([.banner, .sound]); return   // local (usage/forecast) — no on-screen equivalent
-        }
-        // Remote APNs duplicate: suppress ONLY if the LAN poll already surfaced this exact
-        // permission/question in-app. If it hasn't (e.g. the phone is off-LAN so /snapshot
-        // never delivered the card), this push is the ONLY actionable surface — let it through.
+        // Suppress a permission/question banner — LOCAL (syncPermission/syncQuestion, trigger nil)
+        // OR remote APNs — when the in-app card already surfaced it: the card is the actionable
+        // surface, the banner is a redundant double-alert. (Checked BEFORE the trigger type, since
+        // the local perm/question notifs also have an on-screen equivalent, unlike usage/forecast.)
         let info = notification.request.content.userInfo
         let am = ActivityManager.shared
         if let pid = info["permId"] as? String, pid == am.surfacedPermId || am.wasRecentlySurfaced(perm: pid) {
@@ -78,6 +76,9 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
         if let qid = info["questionId"] as? String, qid == am.surfacedQuestionId || am.wasRecentlySurfaced(question: qid) {
             completionHandler([]); return
         }
+        // Anything else — a not-yet-surfaced permission/question (e.g. phone off-LAN so /snapshot
+        // never delivered the card → this push is the only actionable surface), or a usage/forecast
+        // local with no on-screen equivalent — banners.
         completionHandler([.banner, .sound])
     }
 
@@ -466,7 +467,13 @@ struct QuestionCard: View {
         .background(RoundedRectangle(cornerRadius: 16).strokeBorder(T.accent.opacity(0.55), lineWidth: 1.2))
     }
 
-    private var answered: Bool { q.items.indices.allSatisfy { !(sel[$0] ?? []).isEmpty } }
+    // Require at least one item AND every item answered — `allSatisfy` is vacuously true for an
+    // empty `items`, which would enable "Send" with no answers; an option-less item can't be met.
+    private var answered: Bool {
+        !q.items.isEmpty && q.items.indices.allSatisfy { i in
+            !q.items[i].options.isEmpty && !(sel[i] ?? []).isEmpty
+        }
+    }
     private func isSel(_ idx: Int, _ oi: Int) -> Bool { (sel[idx] ?? []).contains(oi) }
     private func toggle(_ idx: Int, _ item: EdgeSnapshot.Question.Item, _ oi: Int) {
         var s = sel[idx] ?? []

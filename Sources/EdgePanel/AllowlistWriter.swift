@@ -12,6 +12,10 @@ enum AllowlistWriter {
 
     static func rule(for event: HookEvent) -> String {
         let tool = event.toolName ?? "Bash"
+        // Never mint an "always allow" grant for an irreversible/destructive action — "Always" on
+        // `rm -rf ~`, a force-push, `curl|sh`, or a write to ~/.ssh must NOT persist a broad rule.
+        // Fall back to the bare tool name, which add() deliberately does NOT persist (→ re-ask).
+        if RiskEngine.assess(toolName: event.toolName, event: event).alwaysDangerous { return tool }
         if tool == "Bash", let cmd = event.command {
             var tokens = cmd.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             // Skip env-assignments (FOO=bar) so the rule keys off the real command, not
@@ -50,6 +54,13 @@ enum AllowlistWriter {
 
     @discardableResult
     static func add(rule: String) -> Bool {
+        // Only persist a properly-scoped `Tool(specifier)` rule. A bare tool name ("Bash", "Write")
+        // is the re-ask fallback for dangerous/wrapper commands — persisting it would grant the
+        // WHOLE tool, so we don't write it: the request was allowed once; future ones re-ask.
+        guard rule.contains("(") else {
+            NSLog("EdgePanel always-allow → not persisting a non-specific rule (re-ask next time): \(rule)")
+            return true
+        }
         lock.lock()
         defer { lock.unlock() }
         guard let data = FileManager.default.contents(atPath: settingsPath),

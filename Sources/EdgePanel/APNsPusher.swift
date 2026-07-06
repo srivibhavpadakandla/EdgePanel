@@ -46,10 +46,16 @@ final class APNsPusher: @unchecked Sendable {
     /// Fired when APNs rejects a token as permanently dead (410 Unregistered/ExpiredToken,
     /// or 400 BadDeviceToken) — the Live Activity ended or the app was reinstalled. The owner
     /// drops the token so it stops being hammered and a FRESH push-to-start can take over.
-    var onInvalidToken: ((_ token: String, _ pushType: String) -> Void)?
+    private var _onInvalidToken: ((_ token: String, _ pushType: String) -> Void)?
+    var onInvalidToken: ((_ token: String, _ pushType: String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onInvalidToken }   // read on the URLSession queue
+        set { lock.lock(); defer { lock.unlock() }; _onInvalidToken = newValue }
+    }
 
-    /// Push a Live Activity event ("update" or "end") to a per-activity token.
-    func pushActivity(token: String, event: String, contentState: [String: Any], alert: [String: Any]? = nil) {
+    /// Push a Live Activity event ("update" or "end") to a per-activity token. `priority` overrides
+    /// the default (routine updates go at 5; the terminal "done" update must pass 10 so it isn't
+    /// throttled/reordered behind the `end` that tears the Island down before "✓ Done" renders).
+    func pushActivity(token: String, event: String, contentState: [String: Any], alert: [String: Any]? = nil, priority: Int? = nil) {
         guard let config else { return }
         var aps: [String: Any] = ["timestamp": Int(Date().timeIntervalSince1970),
                                   "event": event, "content-state": contentState]
@@ -63,7 +69,7 @@ final class APNsPusher: @unchecked Sendable {
         // go at priority 5; "end" (and the one-off alert it carries) stay at 10.
         send(token: token, payload: ["aps": aps],
              topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity",
-             priority: event == "update" ? 5 : 10)
+             priority: priority ?? (event == "update" ? 5 : 10))
     }
 
     /// Push-to-start (iOS 17.2+): create the Live Activity even when the app isn't

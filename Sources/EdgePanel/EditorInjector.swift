@@ -49,10 +49,17 @@ final class EditorInjector: @unchecked Sendable {
     /// first focus/paste didn't take (the extension's Cmd+Esc focus can toggle the input off
     /// when it's already focused, so a single blind paste isn't reliable). Returns true only
     /// when the message is verified in the transcript. MUST be called off the main thread.
+    /// ONE injection machine-wide at a time — the clipboard and keystroke stream are process-global,
+    /// so two concurrent injects (different sessions) would clobber each other's clipboard and
+    /// interleave keystrokes. The per-session `resuming` guard doesn't cover cross-session.
+    private static let injectLock = NSLock()
+
     @discardableResult
     func inject(text: String, sessionId: String, cwd: String) -> Bool {
         let needle = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return false }
+        Self.injectLock.lock()
+        defer { Self.injectLock.unlock() }
         let pb = NSPasteboard.general
         // AppKit (find editor, set clipboard, activate) on main — snapshot the user's
         // clipboard so we can restore it after the paste (don't destroy their copied text).
@@ -66,10 +73,24 @@ final class EditorInjector: @unchecked Sendable {
             return (prior, pb.changeCount)
         }
         guard let saved else { return false }
-        // Activation is ASYNC — wait until the editor is really frontmost before any keystroke.
-        // A fixed sleep raced slow app switches and dropped the paste/Return into the wrong app
-        // (a big source of "glitchy"). Then focus the chat input, paste ONCE, submit.
-        waitFrontmost(timeout: 1.8)
+        // Restore the user's clipboard, clearing our injected text — but only if they haven't copied
+        // something new since (changeCount unchanged). Gating on changeCount (not string-equality)
+        // also restores correctly when the prior clipboard was empty.
+        func restoreClipboard() {
+            onMain {
+                guard pb.changeCount == saved.change else { return }   // user copied since → leave it
+                pb.clearContents()
+                if let p = saved.prior { pb.setString(p, forType: .string) }
+            }
+        }
+        // Activation is ASYNC. ABORT if the editor never actually became frontmost — otherwise the
+        // paste + Return would fire into whatever app IS frontmost (browser, terminal, a source
+        // file). Better to fail the inject than type the message into the wrong window.
+        guard waitFrontmost(timeout: 1.8) else {
+            NSLog("EdgePanel inject ABORTED — editor never became frontmost; not typing into the wrong app")
+            restoreClipboard()
+            return false
+        }
         focusChatInput()
         pasteOnce()
         submitReturn()
@@ -89,17 +110,10 @@ final class EditorInjector: @unchecked Sendable {
             ensureFrontmost()
             submitReturn()
         }
-
-        // Restore the user's clipboard, ALWAYS clearing our injected text — but only if they
-        // haven't copied something new since (changeCount unchanged). Gating on changeCount
-        // (not string-equality) also restores correctly when the prior clipboard was empty.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-            self.onMain {
-                guard pb.changeCount == saved.change else { return }   // user copied since → leave it
-                pb.clearContents()
-                if let p = saved.prior { pb.setString(p, forType: .string) }
-            }
-        }
+        // The paste was consumed early (focus→paste→submit); by now the retry loop has waited
+        // seconds, so restore synchronously (inside the lock) — a deferred restore could clobber
+        // the NEXT injection's clipboard after the lock released.
+        restoreClipboard()
         return landed
     }
 
@@ -159,17 +173,18 @@ final class EditorInjector: @unchecked Sendable {
 
     /// Block until the target editor is the frontmost app (activation is async), up to `timeout`,
     /// then a small settle — so keystrokes can't fire into the previously-frontmost app.
-    private func waitFrontmost(timeout: TimeInterval) {
+    @discardableResult
+    private func waitFrontmost(timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let up = onMain { () -> Bool in
                 guard let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
                 return self.editorBundles.contains(id)
             }
-            if up { usleep(250_000); return }
+            if up { usleep(250_000); return true }
             usleep(120_000)
         }
-        usleep(300_000)   // best effort even if we couldn't confirm
+        return false   // never confirmed frontmost → caller aborts rather than typing into the wrong app
     }
     /// Re-activate the editor (used before a re-submit, in case another app stole focus).
     private func ensureFrontmost() {
@@ -185,12 +200,18 @@ final class EditorInjector: @unchecked Sendable {
               let el = f, CFGetTypeID(el) == AXUIElementGetTypeID() else { return nil }
         return (el as! AXUIElement)
     }
-    /// True if `el` is a text-entry control (or its role is unknown → don't block on uncertainty).
+    /// True if `el` is a text-entry control — OR a webview/container/opaque role we must NOT disturb.
+    /// The Electron Claude Code chat input surfaces to system-wide AX as AXGroup / AXWebArea /
+    /// AXScrollArea (not a text role), so treating those as "leave it" stops the corrective second
+    /// Cmd+Esc from blurring a correctly-focused input. Only a DEFINITELY-wrong role (button, list,
+    /// outline) triggers the corrective toggle.
     private func isTextLike(_ el: AXUIElement) -> Bool {
         var r: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r) == .success,
               let role = r as? String else { return true }
-        return role == (kAXTextAreaRole as String) || role == (kAXTextFieldRole as String) || role == "AXComboBox"
+        let leaveAlone: Set<String> = [kAXTextAreaRole as String, kAXTextFieldRole as String, "AXComboBox",
+                                       "AXGroup", "AXWebArea", "AXScrollArea", "AXUnknown"]
+        return leaveAlone.contains(role)
     }
 
     /// Interrupt the running turn in the live editor session (Escape stops generation).

@@ -27,14 +27,16 @@ public enum RiskEngine {
         if name == "bash" || bare.contains("bash") || bare.contains("shell") {
             return assessCommand(command ?? event?.command ?? "")
         }
+        // Severity order matters: a DESTRUCTIVE verb wins over a co-occurring PATH or read/write
+        // verb — so a tool like `mcp__fs__delete_file` carrying {"path":…} is NOT downgraded to
+        // .read by the filePath branch below and silently auto-allowed. This MUST precede the
+        // filePath branch. (Mirrors ToolRisk.classify's destructive-before-read ordering.)
+        if bare.contains("delete") || bare.contains("remove") || bare.contains("destroy") || bare.contains("drop")
+            || bare.contains("deploy") || bare.contains("publish") || bare.contains("kill") {
+            return RiskAssessment(level: .danger, reason: "destructive action", alwaysDangerous: true)
+        }
         if let path = filePath ?? event?.filePath {
             return assessFile(tool: bare, path: path, cwd: cwd ?? event?.cwd)
-        }
-        // Severity order matters: a DESTRUCTIVE verb wins over any co-occurring read/write
-        // verb, so e.g. an MCP tool named "search_and_delete" isn't downgraded to .read and
-        // auto-allowed. (Mirrors ToolRisk.classify's destructive-before-read ordering.)
-        if bare.contains("delete") || bare.contains("remove") || bare.contains("deploy") || bare.contains("publish") || bare.contains("kill") {
-            return RiskAssessment(level: .danger, reason: "destructive action", alwaysDangerous: true)
         }
         if bare.contains("fetch") || bare.contains("web") || bare.contains("http") {
             return RiskAssessment(level: .danger, reason: "network access", alwaysDangerous: false)
@@ -138,15 +140,33 @@ public enum RiskEngine {
         return out.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
+    /// The git SUBCOMMAND of a statement, skipping git's global options (`-C <path>`, `-c k=v`,
+    /// `--git-dir …`, `--paginate`, …) so `git -C /r push --force` and `git -c k=v reset --hard`
+    /// are still recognized. Contiguous-substring matching (`cmd.contains("git push")`) missed
+    /// these and let a force-push / hard-reset fall through to "safe". nil if not a git command.
+    private static func gitSubcommand(_ cmd: String) -> String? {
+        let toks = cmd.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard let gi = toks.firstIndex(of: "git") else { return nil }
+        let valueOpts: Set<String> = ["-c", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]
+        var i = gi + 1
+        while i < toks.count {
+            let t = toks[i]
+            if t == "-C" || valueOpts.contains(t) { i += 2; continue }   // option + its separate value token
+            if t.hasPrefix("-") { i += 1; continue }                     // attached-value (--x=y) or bare flag
+            return t                                                     // first non-option token = the subcommand
+        }
+        return nil
+    }
+
     private static func assessStatement(_ raw: String, depth: Int = 0) -> RiskAssessment {
         let cmd = raw.lowercased()
         let leaders = commandLeaders(cmd)
 
-        // Pipe-to-shell — the classic remote-exec footgun. ANY pipe into a shell executes
-        // arbitrary fetched/decoded/generated code (curl|sh, base64 -d|sh, echo …|bash), not
-        // just curl/wget, so flag the pipe-into-a-shell itself.
-        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh)\b"#, options: .regularExpression) != nil {
-            return red("pipes into a shell", always: true)
+        // Pipe-to-shell/interpreter — the classic remote-exec footgun. ANY pipe into a shell OR a
+        // scripting interpreter that runs stdin executes arbitrary fetched/decoded/generated code
+        // (curl|sh, base64 -d|sh, curl x.py|python, …|node|ruby|perl|php), so flag the pipe itself.
+        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh|python3?|node|ruby|perl|php)\b"#, options: .regularExpression) != nil {
+            return red("pipes into a shell/interpreter", always: true)
         }
         // Fork bomb / disk wipe.
         if cmd.contains(":(){") { return red("fork bomb", always: true) }
@@ -192,8 +212,10 @@ public enum RiskEngine {
             if recursive { return red("recursive delete", always: true) }
             return amber("deletes a file")
         }
-        // git push — force to a protected branch is the scary one.
-        if cmd.contains("git push") {
+        // git push — force to a protected branch is the scary one. (subcommand-aware so a global
+        // option like `git -C /r push --force` can't slip past a contiguous-substring check.)
+        let gitSub = gitSubcommand(cmd)
+        if gitSub == "push" {
             // Force = --force / --force-with-lease / -f / a `+refspec` (anchored to a token
             // start, so a stray '+' elsewhere — e.g. "c++-rewrite" — isn't a false positive).
             let force = cmd.contains("--force") || cmd.contains("--force-with-lease")
@@ -214,7 +236,7 @@ public enum RiskEngine {
             if force { return red("force-push") }
             return amber("pushes to a remote")
         }
-        if cmd.contains("git reset --hard") || cmd.contains("git clean -") { return red("discards uncommitted work") }
+        if (gitSub == "reset" && cmd.contains("--hard")) || gitSub == "clean" { return red("discards uncommitted work") }
         // System paths.
         if cmd.range(of: #">\s*/(etc|usr|bin|sbin|system|library)"#, options: .regularExpression) != nil
             || cmd.range(of: #"\b(chmod|chown)\b.*\s/(etc|usr|bin|sbin|system)"#, options: .regularExpression) != nil {
@@ -267,7 +289,7 @@ public enum RiskEngine {
             return amber("installs/removes packages")
         }
         // Mutating git / file moves.
-        if cmd.contains("git commit") || cmd.contains("git merge") || cmd.contains("git rebase") || cmd.contains("mv ") || cmd.contains("> ") {
+        if ["commit", "merge", "rebase"].contains(gitSub ?? "") || cmd.contains("mv ") || cmd.contains("> ") {
             return amber("modifies files / history")
         }
         return RiskAssessment(level: .read, reason: "safe command", alwaysDangerous: false)
@@ -281,6 +303,7 @@ public enum RiskEngine {
         let inSystem = lower.hasPrefix("/etc") || lower.hasPrefix("/usr") || lower.hasPrefix("/system") || lower.hasPrefix("/library") || lower.hasPrefix("/private/etc")
         let inWorkspace = cwd.map { p.hasPrefix(($0 as NSString).expandingTildeInPath) } ?? false
         let writing = tool.contains("write") || tool.contains("edit") || tool.contains("create")
+            || tool.contains("move") || tool.contains("rename")   // move/rename mutate the filesystem
 
         // The irreversible 1% at the USER level: login/boot persistence, credentials, shell
         // init, and EdgePanel's own allowlist file. These expand to ~/Library/... or ~/.x and

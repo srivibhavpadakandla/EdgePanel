@@ -507,7 +507,11 @@ final class EdgePanelState: ObservableObject {
 
     static func buildPreview(_ event: HookEvent) -> [PreviewLine] {
         let maxLines = 6
-        if let old = event.oldString.map(redactSecrets), let new = event.newString.map(redactSecrets) {
+        // Only the first few lines are ever shown, so cap each field to a few KB BEFORE running the
+        // secret-redaction regexes — otherwise an 8 MB Write/content body regex-scans on the MainActor.
+        func cap(_ s: String) -> String { s.count > 8_000 ? String(s.prefix(8_000)) : s }
+        let redact: (String) -> String = { redactSecrets(cap($0)) }
+        if let old = event.oldString.map(redact), let new = event.newString.map(redact) {
             var lines: [PreviewLine] = []
             for l in old.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines / 2) {
                 lines.append(PreviewLine(kind: .removed, text: String(l)))
@@ -517,11 +521,11 @@ final class EdgePanelState: ObservableObject {
             }
             return lines
         }
-        if let content = event.content.map(redactSecrets) {
+        if let content = event.content.map(redact) {
             return content.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
                 .map { PreviewLine(kind: .added, text: String($0)) }
         }
-        if let cmd = event.command.map(redactSecrets) {
+        if let cmd = event.command.map(redact) {
             return cmd.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
                 .map { PreviewLine(kind: .context, text: String($0)) }
         }
@@ -556,16 +560,24 @@ final class EdgePanelState: ObservableObject {
         if let m = d.dictionary(forKey: "edgepanel.activityTokens") as? [String: String] { activityPushTokens = m }
         pushToStartToken = d.string(forKey: "edgepanel.startToken")
         devicePushToken = d.string(forKey: "edgepanel.deviceToken")
+        // Persisted so a Mac restart doesn't reset "when the phone was last active" to distantPast,
+        // which would make the FIRST post-restart scan drop the restored (still-live) Island token.
+        let at = d.double(forKey: "edgepanel.activityTokenAt")
+        if at > 0 { lastActivityTokenAt = Date(timeIntervalSince1970: at) }
         // When APNs reports a Live Activity / push-to-start token as permanently dead
         // (410 — the Island ended or the app was reinstalled), drop it so we stop hammering
         // it every ~10s and a fresh token (sent when the app next runs) drives the next Island.
         APNsPusher.shared.onInvalidToken = { [weak self] token, _ in
             Task { @MainActor in
                 guard let self else { return }
-                for (k, v) in self.activityPushTokens where v == token { self.activityPushTokens[k] = nil }
-                if self.pushToStartToken == token { self.pushToStartToken = nil }
+                var liveActivityTokenDied = false
+                for (k, v) in self.activityPushTokens where v == token { self.activityPushTokens[k] = nil; liveActivityTokenDied = true }
+                if self.pushToStartToken == token { self.pushToStartToken = nil; liveActivityTokenDied = true }
                 if self.devicePushToken == token { self.devicePushToken = nil }   // dead device token → stop targeting it
-                self.lastPushedWorkingIds = []     // re-push/start cleanly when a token next arrives
+                // Only reset the Island-aggregation state when a LIVE-ACTIVITY token actually died.
+                // A dead *device/alert* token 410 must NOT wipe lastPushedWorkingIds — that corrupted
+                // the aggregation (skipped a two-step end, or spawned a duplicate Island).
+                if liveActivityTokenDied { self.lastPushedWorkingIds = [] }
                 self.savePushTokens()
             }
         }
@@ -575,6 +587,7 @@ final class EdgePanelState: ObservableObject {
         d.set(activityPushTokens, forKey: "edgepanel.activityTokens")
         d.set(pushToStartToken, forKey: "edgepanel.startToken")
         d.set(devicePushToken, forKey: "edgepanel.deviceToken")
+        d.set(lastActivityTokenAt.timeIntervalSince1970, forKey: "edgepanel.activityTokenAt")
     }
 
     func setPushToken(kind: String, sessionId: String?, token: String) {
@@ -627,7 +640,11 @@ final class EdgePanelState: ObservableObject {
         // is a leftover whose Island iOS already reaped (updating it just no-ops → "I have to open
         // the app to see the Island"). Drop it so we push-start a fresh one. During a running turn
         // we NEVER drop the token, so the two-step "end" below can always fire → the Island stops.
-        if newWorkSession && !appForeground && activityPushTokens["edgepanel"] != nil {
+        // GUARD `pendingEndTask == nil`: if a two-step end is mid-flight (turn just finished, Island
+        // still live), a follow-up prompt within the 6.5s window must RECLAIM that same Island (the
+        // `!working.isEmpty` branch below cancels the end + updates it) — NOT drop its token and
+        // push-start a duplicate that leaves the first Island stuck.
+        if newWorkSession && !appForeground && pendingEndTask == nil && activityPushTokens["edgepanel"] != nil {
             activityPushTokens["edgepanel"] = nil
             savePushTokens()
         }
@@ -664,7 +681,9 @@ final class EdgePanelState: ObservableObject {
             let detail = lastFinishedDetail ?? "finished"
             let doneState: [String: Any] = ["sessions": [[String: Any]](), "done": true, "doneDetail": detail]
             NSLog("EdgePanel ISLAND END: update(done) now → end in 6.5s (Island stops counting)")
-            APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState)
+            // priority 10: the terminal "done" flip is a one-off important state change; at the
+            // default priority 5 it can be throttled/reordered behind the `end` and never render.
+            APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState, priority: 10)
             pendingEndTask?.cancel()
             pendingEndTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly on the Island
