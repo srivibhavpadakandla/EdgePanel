@@ -495,11 +495,7 @@ final class EdgePanelState: ObservableObject {
         let first = q.items.first
         // Redact like the permission path — don't ship a secret in the question text through APNs/ntfy.
         let body = Self.redactSecrets(first.map { $0.header.isEmpty ? $0.question : $0.header } ?? "Tap to choose an answer")
-        if APNsPusher.shared.enabled, let dt = devicePushToken {
-            APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body, questionId: q.id)
-        }
-        NtfyPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
-        TelegramPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
+        Notifier.question(deviceToken: devicePushToken, id: q.id, title: "Claude is asking you", body: body)
     }
 
     /// Mask common secret patterns so a token/key in a command or diff doesn't get
@@ -844,12 +840,7 @@ final class EdgePanelState: ObservableObject {
     /// (free, with Allow/Deny action buttons). No-op if neither is configured.
     private func pushPermissionAlert(_ p: PendingPermission) {
         let body = Self.redactSecrets(p.summary.isEmpty ? p.reason : p.summary)   // don't ship a secret through APNs/ntfy
-        if APNsPusher.shared.enabled, let dt = devicePushToken {
-            APNsPusher.shared.pushPermission(deviceToken: dt, id: p.id,
-                title: "\(p.toolName) needs approval", body: body)
-        }
-        NtfyPusher.shared.pushPermission(id: p.id, tool: p.toolName, summary: body, risk: p.risk.rawValue)
-        TelegramPusher.shared.pushPermission(tool: p.toolName, summary: body, risk: p.risk.rawValue)
+        Notifier.permission(deviceToken: devicePushToken, id: p.id, tool: p.toolName, summary: body, risk: p.risk.rawValue)
     }
 
     /// Push an "end" Live Activity update + alert when a session finishes — so the
@@ -857,11 +848,7 @@ final class EdgePanelState: ObservableObject {
     /// Push a 5-hour usage alert (APNs + ntfy) — owned by the Mac so it reaches the phone
     /// even when the app is closed (the app's own poll-driven check only ran while it was open).
     func pushUsageAlert(title: String, body: String) {
-        if APNsPusher.shared.enabled, let dt = devicePushToken {
-            APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
-        }
-        NtfyPusher.shared.pushDone(title: title, detail: body)
-        TelegramPusher.shared.pushDone(title: title, detail: body)
+        Notifier.alert(deviceToken: devicePushToken, title: title, body: body)
     }
 
     func pushSessionEnded(_ s: LiveSession) {
@@ -887,12 +874,12 @@ final class EdgePanelState: ObservableObject {
             let body = baseDetail + outcome
             let title = "✓ \(name)"
             DispatchQueue.main.async {
-                if APNsPusher.shared.enabled, let dt {
-                    APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
-                }
+                // A turn ≥15s pings ALL channels; a very quick reply only bumps the (silent-ish)
+                // APNs/Island path, not ntfy/Telegram, to avoid buzzing you for a 3-second answer.
                 if elapsed >= 15 {
-                    NtfyPusher.shared.pushDone(title: title, detail: body)
-                    TelegramPusher.shared.pushDone(title: title, detail: body)
+                    Notifier.alert(deviceToken: dt, title: title, body: body)
+                } else if APNsPusher.shared.enabled, let dt {
+                    APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
                 }
             }
         }
