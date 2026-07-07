@@ -206,16 +206,16 @@ struct Dashboard: View {
             if let s = client.snapshot {
                 if let q = s.question { QuestionCard(q: q).id(q.id) }   // fresh @State per question (no stale selection leak)
                 if let pend = s.pending { PermissionCard(p: pend) }
-                if let p = s.plan { PlanCard(plan: p) }
-                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk)
-                WorkingCard(working: s.working)
-                CalendarCard(days: s.calendar)
+                if let p = s.plan { PlanCard(plan: p).appearIn(0) }
+                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk).appearIn(1)
+                WorkingCard(working: s.working).appearIn(2)
+                CalendarCard(days: s.calendar).appearIn(3)
                 HStack(spacing: 12) {
                     WeeklyCard(plan: s.plan)
                     SpendCard(spend: s.spend)
-                }
-                RecentChatsCard(chats: s.chats)
-                PromptHistoryCard(prompts: s.promptHistory ?? [])
+                }.appearIn(4)
+                RecentChatsCard(chats: s.chats).appearIn(5)
+                PromptHistoryCard(prompts: s.promptHistory ?? []).appearIn(6)
             } else {
                 VStack(spacing: 10) {
                     ProgressView().tint(T.accent)
@@ -376,7 +376,7 @@ struct PlanCard: View {
         let sev = sevColor(frac)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(Int(plan.fiveHourPct.rounded()))").font(.claude(46, .bold)).foregroundColor(T.text)
+                RollingInt(value: Int(plan.fiveHourPct.rounded())).font(.claude(46, .bold)).foregroundColor(T.text)
                 Text("%").font(.claude(24, .bold)).foregroundColor(T.text.opacity(0.55))
                 Spacer()
                 HStack(spacing: 5) {
@@ -386,7 +386,7 @@ struct PlanCard: View {
                 .padding(.horizontal, 11).padding(.vertical, 6)
                 .background(Capsule().fill(Color.black.opacity(0.22)))
             }
-            Bar(frac: frac, color: sev, height: 11)
+            Bar(frac: frac, color: sev, height: 11).animation(Motion.number, value: frac)
             HStack(spacing: 8) {
                 if let reset = plan.fiveHourResetEpoch {
                     let rem = max(reset - Date().timeIntervalSince1970, 0)
@@ -405,6 +405,7 @@ struct PlanCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
+        .pressable()
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(LinearGradient(colors: [Color(hex: 0x302720), Color(hex: 0x211C18)], startPoint: .top, endPoint: .bottom))
@@ -821,7 +822,9 @@ struct WeeklyCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "Weekly")
                 Text(plan.map { "\(Int($0.weekPct.rounded()))%" } ?? "—").font(.claude(24, .bold)).foregroundColor(T.text)
+                    .contentTransition(.numericText()).animation(Motion.number, value: plan?.weekPct)
                 Bar(frac: min(max((plan?.weekPct ?? 0) / 100, 0), 1), color: sevColor((plan?.weekPct ?? 0) / 100))
+                    .animation(Motion.number, value: plan?.weekPct)
                 if let reset = plan?.weekResetEpoch {
                     let rem = max(reset - Date().timeIntervalSince1970, 0)
                     Text(exactReset ? "resets \(dayStr(reset))" : "resets in \(Int(rem) / 86400)d \((Int(rem) % 86400) / 3600)h")
@@ -831,6 +834,7 @@ struct WeeklyCard: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { exactReset.toggle() } }
+        .pressable()
     }
 }
 
