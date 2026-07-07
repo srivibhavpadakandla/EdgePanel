@@ -162,14 +162,13 @@ final class UsageStore: ObservableObject {
         for (id, prev) in prevWorking where workingNow[id] == nil {
             let misses = (endMisses[id] ?? 0) + 1
             if misses >= 2 {                       // gone for 2 scans → really finished
-                // Fire the "finished" phone push. For the session you're actively watching on
-                // this Mac, only ping for turns that ran a while (≥20s) — you don't need a buzz
-                // for a quick on-screen reply, but a long turn likely means you stepped away.
-                // Remote/phone sessions always ping. (The phone also suppresses the banner while
-                // its app is foreground, so you're only alerted when you're not looking at it.)
+                // Fire the "finished" phone push ONLY for a session you're NOT sitting in front of —
+                // i.e. a remote/phone-initiated turn. The session open in your editor (interactiveId)
+                // is one you're already watching on screen (+ the Dynamic Island), so pinging your
+                // phone for every one of its turns was a per-reply spam that iOS throttles into
+                // silence — which is why "done" notifications stopped arriving at all.
                 let ended = byId[id] ?? prev
-                let elapsed = ended.promptAt.map { max(Date().timeIntervalSince($0), 0) } ?? 0
-                if id != interactiveId || elapsed >= 20 { onSessionEnded?(ended) }
+                if id != interactiveId { onSessionEnded?(ended) }
                 endMisses[id] = nil
             } else {                               // first miss → keep tracking, don't fire yet
                 endMisses[id] = misses

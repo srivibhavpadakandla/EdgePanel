@@ -2,6 +2,30 @@ import AppKit
 import SwiftUI
 import PerchCore
 import Darwin
+import CryptoKit
+
+/// Shared auth helpers so NtfyPusher (a separate class) can mint a scoped action token without
+/// needing a reference to AppDelegate or the raw pairing token.
+enum EdgePanelAuth {
+    static func pairingToken() -> String {
+        let key = "edgepanel.pairingToken"
+        if let t = UserDefaults.standard.string(forKey: key), !t.isEmpty { return t }
+        let t = UUID().uuidString
+        UserDefaults.standard.set(t, forKey: key)
+        return t
+    }
+
+    /// A scoped, single-permission action token: proves possession of the pairing token without
+    /// ever transmitting it. ntfy.sh is a public third-party relay by default (the topic name is
+    /// the only access control), so an action button embedding the RAW pairing token would hand
+    /// anyone who reads that topic full LAN control (/chat, /open, /pushtoken, every route) —
+    /// this token can only ever resolve the ONE permission id + decision it was minted for.
+    static func actionToken(id: String, decision: String) -> String {
+        let key = SymmetricKey(data: Data(pairingToken().utf8))
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("\(id)|\(decision)".utf8), using: key)
+        return Data(mac).map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -110,6 +134,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return (try? JSONEncoder().encode(snap)) ?? Data("{}".utf8)
                 }
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
+            case ("GET", "/debug/testnotif"):
+                // Test-only (EDGEPANEL_DEBUG=1): fire ONE real notification (APNs alert + ntfy) to the
+                // paired phone, to confirm the closed-app delivery path end-to-end.
+                guard ProcessInfo.processInfo.environment["EDGEPANEL_DEBUG"] == "1" else { return .notFound() }
+                await MainActor.run {
+                    state.pushUsageAlert(title: "EdgePanel test 🔔", body: "If you see this, notifications work.")
+                }
+                return .ok("test notification sent")
             case ("GET", "/debug/render"):
                 // Test-only (EDGEPANEL_DEBUG=1): render the live panel to a PNG at ?out=,
                 // so the mascot + ModeCard can be eyeballed even with the display asleep.
@@ -155,13 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - LAN bridge for the iPhone companion (token-protected)
 
-    private func pairingToken() -> String {
-        let key = "edgepanel.pairingToken"
-        if let t = UserDefaults.standard.string(forKey: key), !t.isEmpty { return t }
-        let t = UUID().uuidString
-        UserDefaults.standard.set(t, forKey: key)
-        return t
-    }
+    private func pairingToken() -> String { EdgePanelAuth.pairingToken() }
 
     private func startLANServer() {
         let token = pairingToken()
@@ -182,9 +208,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return nil
             }()
-            guard Self.constantTimeEqual(headerTok ?? queryTok, token) else {
-                return HTTPResponse(status: 401, headers: ["Content-Type": "application/json"],
-                                    body: Data("{\"error\":\"unauthorized\"}".utf8))
+            if !Self.constantTimeEqual(headerTok ?? queryTok, token) {
+                // The full pairing token didn't match. The ONE exception: /permission/decide may
+                // instead authenticate with a scoped per-action token (see EdgePanelAuth) — this
+                // is how ntfy action buttons resolve a permission, since ntfy.sh is a public
+                // third-party relay by default and must never carry the raw, full-control token.
+                guard request.method == "POST", path == "/permission/decide",
+                      let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let id = obj["id"] as? String, let decision = obj["decision"] as? String,
+                      let actionTok = request.headers["x-edgepanel-action-token"],
+                      Self.constantTimeEqual(actionTok, EdgePanelAuth.actionToken(id: id, decision: decision))
+                else {
+                    return HTTPResponse(status: 401, headers: ["Content-Type": "application/json"],
+                                        body: Data("{\"error\":\"unauthorized\"}".utf8))
+                }
+                await MainActor.run { state.resolveRemote(id: id, decision: decision) }
+                return .ok("ok")
             }
             if request.method == "GET", path == "/snapshot" {
                 let data = await MainActor.run { () -> Data in
@@ -204,14 +243,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { state.openChat(cwd: cwd, id: id) }
                 return .ok("opening")
             }
-            // Register an APNs push token (Tier 2). Body: {kind, token, sessionId?}.
+            // Register an APNs push token (Tier 2). Body: {kind, token, sessionId?, gen?}.
             if request.method == "POST", path == "/pushtoken" {
                 guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
                       let kind = obj["kind"] as? String, let tok = obj["token"] as? String else {
                     return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
                 }
                 let sid = obj["sessionId"] as? String
-                await MainActor.run { state.setPushToken(kind: kind, sessionId: sid, token: tok) }
+                let gen = obj["gen"] as? Int   // the push-to-start generation this token was vended for, if the phone reported one
+                await MainActor.run { state.setPushToken(kind: kind, sessionId: sid, token: tok, gen: gen) }
                 return .ok("ok")
             }
             // Approve/deny a held permission request from the phone. Body: {id, decision}.
