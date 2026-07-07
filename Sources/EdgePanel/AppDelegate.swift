@@ -72,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupDebugToggle()
         NSLog("EdgePanel APNs (Tier 2): \(APNsPusher.shared.enabled ? "ENABLED — pushes when the app is closed" : "disabled (no ~/.edgepanel/apns.json)")")
         NSLog("EdgePanel ntfy (free closed-app push): \(NtfyPusher.shared.enabled ? "ENABLED" : "disabled (no ~/.edgepanel/ntfy.json)")")
+        NSLog("EdgePanel Telegram: \(TelegramPusher.shared.enabled ? "ENABLED" : "disabled (no ~/.edgepanel/telegram.json with token+chatId)")")
         if ProcessInfo.processInfo.environment["EDGEPANEL_SHOW_PAIRING"] == "1" { showPairing() }
         NSLog("EdgePanel launched — Phase 1 (live Usage + hook pipe). Right-edge to reveal · kill -USR1 \(ProcessInfo.processInfo.processIdentifier)")
     }

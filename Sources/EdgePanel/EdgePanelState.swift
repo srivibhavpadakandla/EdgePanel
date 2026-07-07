@@ -100,6 +100,7 @@ final class EdgePanelState: ObservableObject {
     // MARK: Held AskUserQuestion gate (answer from the phone)
     @Published var pendingQuestion: PendingQuestion?
     private var questionResolvers: [String: CheckedContinuation<[String: String], Never>] = [:]
+    private var pendingQuestionById: [String: PendingQuestion] = [:]   // id → request (to re-surface the next one on resolve)
     private var questionCounter = 0
 
     private var resolvers: [String: CheckedContinuation<PermissionVerdict, Never>] = [:]
@@ -453,7 +454,12 @@ final class EdgePanelState: ObservableObject {
         let request = PendingQuestion(id: qid, items: items, project: project)
         return await withCheckedContinuation { continuation in
             questionResolvers[qid] = continuation
-            pendingQuestion = request
+            pendingQuestionById[qid] = request
+            // Don't clobber an already-displayed question — hold this one in the queue and only
+            // take the display slot when nothing else is currently showing. Otherwise a second
+            // concurrent AskUserQuestion silently overwrites `pendingQuestion` and the first one
+            // never gets shown, just times out empty 115s later.
+            if pendingQuestion == nil { pendingQuestion = request }
             onApprovalChange?(true)
             pushQuestionAlert(request)
             idleTimer?.invalidate(); idleTimer = nil
@@ -474,7 +480,13 @@ final class EdgePanelState: ObservableObject {
     private func resolveQuestion(_ qid: String, _ answers: [String: String]) {
         guard let continuation = questionResolvers.removeValue(forKey: qid) else { return }
         continuation.resume(returning: answers)
-        if pendingQuestion?.id == qid { pendingQuestion = nil }
+        pendingQuestionById[qid] = nil
+        if pendingQuestion?.id == qid {
+            // Surface the next still-outstanding question instead of orphaning it, same pattern
+            // as the permission gate below — pick the OLDEST (lowest "q<n>" counter).
+            let nextId = pendingQuestionById.keys.min { (Int($0.dropFirst()) ?? 0) < (Int($1.dropFirst()) ?? 0) }
+            pendingQuestion = nextId.flatMap { pendingQuestionById[$0] }
+        }
         // Don't drop the panel while a permission is still held on the gate.
         onApprovalChange?(pending != nil || pendingQuestion != nil)
     }
@@ -487,6 +499,7 @@ final class EdgePanelState: ObservableObject {
             APNsPusher.shared.pushAlert(deviceToken: dt, title: "Claude is asking you", body: body, questionId: q.id)
         }
         NtfyPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
+        TelegramPusher.shared.pushQuestion(title: "Claude is asking you", body: body)
     }
 
     /// Mask common secret patterns so a token/key in a command or diff doesn't get
@@ -548,6 +561,36 @@ final class EdgePanelState: ObservableObject {
 
     private var pushToStartToken: String?     // iOS 17.2+ push-to-start (pop the Island up while closed)
     private var startPushPending = false
+    // Set when work finishes and we give up waiting for the push-started Island's own token
+    // (see the `working.isEmpty && activityPushTokens["edgepanel"] == nil` branch below) WHILE a
+    // push-to-start was still outstanding — meaning an Island may already be live on the phone
+    // with no way for us to end it yet. If its token arrives late (setPushToken), we must
+    // immediately reconcile (send done+end) instead of silently stranding it forever. Stays true
+    // until the actual straggler token arrives (NOT auto-cleared) — setPushToken's one-shot
+    // reconciliation guard depends on it staying armed indefinitely, or a late token would get
+    // written into activityPushTokens as if newly adopted instead of safely reconciled.
+    private var strandedActivityToken = false
+    // Separate from strandedActivityToken itself: only bounds how long a NEW push-to-start stays
+    // blocked waiting for the straggler, so an unconfirmed stranding can't wedge every future
+    // Island pop-up forever if the token never arrives at all (app force-quit, reinstall,
+    // permanent network loss).
+    private var strandedSince: Date?
+    // Generation counters: without these, once strandRecent lets a NEW push-to-start fire while
+    // the OLD stranding is still armed, that new turn's own genuine confirmation token would still
+    // get swallowed by setPushToken's one-shot reconciliation branch (which only checks the Bool,
+    // not which push-to-start the stranding belongs to) instead of being stored normally.
+    // pushToStartGeneration bumps every push-to-start; strandedGeneration snapshots it at the
+    // moment a stranding is armed, so reconciliation only fires if no NEWER push-to-start happened
+    // since — otherwise the token falls through to the normal adopt path below.
+    private var pushToStartGeneration = 0
+    private var strandedGeneration = 0
+    // Which generation's OWN genuine token has already been stored (via the normal path below).
+    // Without this, a stranding armed at generation 1 that's still un-reconciled when generation 2
+    // starts (>15s idle, strandRecent expired) leaves strandedGeneration=1 stuck forever — so when
+    // generation 1's token FINALLY arrives (merely delayed, not lost — e.g. a slow background
+    // launch), the mismatch (1 != pushToStartGeneration=2) sends it straight to the unconditional
+    // store path, silently clobbering generation 2's already-adopted real token with a stale one.
+    private var lastActivityTokenGeneration = 0
 
     /// Load persisted push tokens so a Mac restart doesn't drop them (which left the
     /// Island unable to receive its "end" and stuck on a frozen timer).
@@ -586,9 +629,64 @@ final class EdgePanelState: ObservableObject {
         d.set(lastActivityTokenAt.timeIntervalSince1970, forKey: "edgepanel.activityTokenAt")
     }
 
-    func setPushToken(kind: String, sessionId: String?, token: String) {
+    func setPushToken(kind: String, sessionId: String?, token: String, gen: Int? = nil) {
+        // DETERMINISTIC path: the phone read the generation back off the Activity's own
+        // attributes (WorkingAttributes.gen, stamped at push-to-start time) and reported it, so
+        // we don't have to guess whether this token belongs to the current push-to-start or an
+        // older one — we know for certain. Falls back to the heuristic below only when `gen` is
+        // absent (an older, not-yet-updated app build's push-to-start, or a non-"activity" kind).
+        if kind == "activity", let sid = sessionId, sid == "edgepanel", let gen {
+            if gen == pushToStartGeneration {
+                // This generation's own genuine token. Always safe to adopt — and if a stranding
+                // was still outstanding, this IS its resolution (proven, not guessed).
+                if strandedActivityToken { strandedActivityToken = false; strandedSince = nil }
+                activityPushTokens[sid] = token; lastActivityTokenAt = Date(); lastActivityTokenGeneration = gen
+                savePushTokens()
+                NSLog("EdgePanel push token received: kind=\(kind) sid=\(sid) token=\(token.prefix(12))… (gen \(gen), current)")
+            } else {
+                // A stale straggler from an OLDER push-to-start — never store it (it would clobber
+                // the current generation's real token); only run the safe idle-only reconciliation
+                // so a genuinely still-stranded Island from that older generation gets its done+end.
+                if lastPushedWorkingIds.isEmpty { sendIslandDone(token: token) }
+                NSLog("EdgePanel push token received: kind=\(kind) sid=\(sid) token=\(token.prefix(12))… (gen \(gen) != current \(pushToStartGeneration), reconciled not adopted)")
+            }
+            return
+        }
+        // HEURISTIC fallback (no generation on the wire). A push-started Island's token showed up
+        // AFTER we'd already given up waiting for it (work finished in the meantime — see
+        // `strandedActivityToken = true` below) — treat it as a ONE-SHOT reconciliation token
+        // rather than writing it into activityPushTokens first: if a second push-to-start already
+        // fired for a NEW turn in the meantime (its own token stored under the same "edgepanel"
+        // key), blindly storing this stale token here would clobber that turn's real one, silently
+        // breaking its own update/end push. strandedGeneration == pushToStartGeneration guards this
+        // further: if a NEWER push-to-start already fired since this stranding was armed, this
+        // arriving token is presumptively that newer turn's OWN genuine confirmation (not the old
+        // straggler) — fall through to the normal store-it path below instead of
+        // reconciling/discarding it as if it were stale. BUT: if the newer generation's own token
+        // has ALREADY been stored (lastActivityTokenGeneration == pushToStartGeneration), this
+        // arriving token can't be that — it's the OLD stranding's straggler, merely delayed rather
+        // than lost, and must NOT be allowed to clobber the newer generation's already-adopted real
+        // token via the unconditional store path below.
+        if kind == "activity", sessionId == "edgepanel", strandedActivityToken,
+           strandedGeneration == pushToStartGeneration || lastActivityTokenGeneration == pushToStartGeneration {
+            strandedActivityToken = false; strandedSince = nil
+            // Only reconcile if we're STILL idle. Without a generation on the wire, an arriving
+            // token can't be proven to be the stale stranded one vs. a routine resend for a NEW
+            // turn that started in the meantime — but if new work has already begun,
+            // lastPushedWorkingIds is non-empty, and forcing a "done" here would wrongly tear down
+            // a currently-live Island mid-turn. Staying idle is the only safe signal.
+            if lastPushedWorkingIds.isEmpty {
+                sendIslandDone(token: token)
+            }
+            NSLog("EdgePanel push token received: kind=\(kind) sid=\(sessionId ?? "-") token=\(token.prefix(12))… (stranded reconciliation, not adopted)")
+            return
+        }
         switch kind {
-        case "activity":  if let sid = sessionId { activityPushTokens[sid] = token; lastActivityTokenAt = Date() }
+        case "activity":
+            if let sid = sessionId {
+                activityPushTokens[sid] = token; lastActivityTokenAt = Date()
+                if sid == "edgepanel" { lastActivityTokenGeneration = pushToStartGeneration }
+            }
         case "device":    devicePushToken = token
         case "starttoken": pushToStartToken = token
         default:          break
@@ -647,17 +745,36 @@ final class EdgePanelState: ObservableObject {
 
         // Work running and we hold NO live Island token → PUSH-TO-START so the Island pops up on
         // its own, even fully closed. Once per work session (re-armed on the next idle→working).
-        if !working.isEmpty, activityPushTokens["edgepanel"] == nil, let st = pushToStartToken, !startPushPending {
+        // The stranded-guard only blocks for 15s (bounded by strandedSince), NOT for as long as
+        // strandedActivityToken itself stays true — that flag must stay armed indefinitely so
+        // setPushToken's one-shot reconciliation still safely absorbs the straggler whenever it
+        // eventually arrives, however late; only NEW push-to-starts need to stop waiting on it.
+        let strandRecent = strandedActivityToken && Date().timeIntervalSince(strandedSince ?? .distantPast) < 15
+        if !working.isEmpty, activityPushTokens["edgepanel"] == nil, let st = pushToStartToken,
+           !startPushPending, !strandRecent {
             startPushPending = true
+            pushToStartGeneration += 1   // this turn's own confirmation must not be swallowed as an older stranding's straggler
             lastPushedWorkingIds = ids; lastAggregatePush = Date(); savePushTokens()
             NSLog("EdgePanel PUSH-TO-START (app closed) → popping Island for \(ids.count) session(s)")
-            APNsPusher.shared.pushStart(token: st, contentState: aggregateState(working), attributes: ["id": "edgepanel"])
+            // "gen" lets setPushToken deterministically identify a straggler by comparing it
+            // against pushToStartGeneration, instead of only guessing from local counters.
+            APNsPusher.shared.pushStart(token: st, contentState: aggregateState(working),
+                                       attributes: ["id": "edgepanel", "gen": pushToStartGeneration])
             return
         }
 
         // Work ended and we have no Island token (push-start's token never came back) → nothing to
         // end; reset so a clean start fires next time. The Island self-freezes + ntfy covers "done".
         if working.isEmpty && activityPushTokens["edgepanel"] == nil {
+            // We push-started an Island for this session and it may already be live on the
+            // phone, but its own confirmation token never arrived before work finished — we
+            // have no token to end it with. Remember that, so a LATE token (setPushToken) can
+            // still reconcile it instead of leaving it stranded forever (see setPushToken).
+            if startPushPending {
+                strandedActivityToken = true
+                strandedSince = Date()   // bounds strandRecent above; strandedActivityToken itself stays armed
+                strandedGeneration = pushToStartGeneration   // snapshot — a later turn's own push-to-start bumps past this
+            }
             lastPushedWorkingIds = []; startPushPending = false; return
         }
 
@@ -670,38 +787,43 @@ final class EdgePanelState: ObservableObject {
         lastPushedWorkingIds = ids
         lastAggregatePush = Date()
         if working.isEmpty {
-            // Two-step "complete" so the Island/Lock Screen visibly flips to DONE before
-            // it dismisses. The Island is torn down on `end` regardless of dismissal-date,
-            // so the done state MUST be shown via a prior `update` (verified vs ActivityKit
-            // docs). update(done) → hold → end(done)+dismissal, then release the token.
-            let detail = lastFinishedDetail ?? "finished"
-            let doneState: [String: Any] = ["sessions": [[String: Any]](), "done": true, "doneDetail": detail]
-            NSLog("EdgePanel ISLAND END: update(done) now → end in 6.5s (Island stops counting)")
-            // priority 10: the terminal "done" flip is a one-off important state change; at the
-            // default priority 5 it can be throttled/reordered behind the `end` and never render.
-            APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState, priority: 10)
-            pendingEndTask?.cancel()
-            pendingEndTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly on the Island
-                guard let self, !Task.isCancelled else { return }
-                // Clear OUR OWN handle when this task finishes — whether it sends the end OR bails
-                // because the phone rotated the Island's token during the hold window. Leaving it
-                // non-nil made the `pendingEndTask == nil` drop-guard block the NEXT turn's stale-token
-                // drop → the "must open the app to see the Island" bug recurred for one turn. Safe:
-                // everything here runs on the @MainActor so no new turn can reassign it mid-body, and
-                // the isCancelled re-check means a turn that cancelled+replaced us keeps its handle.
-                defer { if !Task.isCancelled { self.pendingEndTask = nil } }
-                guard self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
-                      self.activityPushTokens["edgepanel"] == token // …and the same activity
-                else { return }
-                NSLog("EdgePanel ISLAND END: end event sent → Island dismissed")
-                APNsPusher.shared.pushActivity(token: token, event: "end", contentState: doneState)
-                self.activityPushTokens["edgepanel"] = nil   // ended → allow a fresh push-to-start next time
-                self.savePushTokens()
-            }
+            sendIslandDone(token: token)
             return
         }
         APNsPusher.shared.pushActivity(token: token, event: "update", contentState: aggregateState(working))
+    }
+
+    /// Two-step "complete" so the Island/Lock Screen visibly flips to DONE before it dismisses.
+    /// The Island is torn down on `end` regardless of dismissal-date, so the done state MUST be
+    /// shown via a prior `update` (verified vs ActivityKit docs). update(done) → hold → end(done)
+    /// +dismissal, then release the token. Also used to reconcile a push-started Island whose
+    /// token arrived only after work had already finished (see setPushToken).
+    private func sendIslandDone(token: String) {
+        let detail = lastFinishedDetail ?? "finished"
+        let doneState: [String: Any] = ["sessions": [[String: Any]](), "done": true, "doneDetail": detail]
+        NSLog("EdgePanel ISLAND END: update(done) now → end in 6.5s (Island stops counting)")
+        // priority 10: the terminal "done" flip is a one-off important state change; at the
+        // default priority 5 it can be throttled/reordered behind the `end` and never render.
+        APNsPusher.shared.pushActivity(token: token, event: "update", contentState: doneState, priority: 10)
+        pendingEndTask?.cancel()
+        pendingEndTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly on the Island
+            guard let self, !Task.isCancelled else { return }
+            // Clear OUR OWN handle when this task finishes — whether it sends the end OR bails
+            // because the phone rotated the Island's token during the hold window. Leaving it
+            // non-nil made the `pendingEndTask == nil` drop-guard block the NEXT turn's stale-token
+            // drop → the "must open the app to see the Island" bug recurred for one turn. Safe:
+            // everything here runs on the @MainActor so no new turn can reassign it mid-body, and
+            // the isCancelled re-check means a turn that cancelled+replaced us keeps its handle.
+            defer { if !Task.isCancelled { self.pendingEndTask = nil } }
+            guard self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
+                  self.activityPushTokens["edgepanel"] == token // …and the same activity
+            else { return }
+            NSLog("EdgePanel ISLAND END: end event sent → Island dismissed")
+            APNsPusher.shared.pushActivity(token: token, event: "end", contentState: doneState)
+            self.activityPushTokens["edgepanel"] = nil   // ended → allow a fresh push-to-start next time
+            self.savePushTokens()
+        }
     }
 
     /// The aggregate Live Activity content-state (mirrors iOS WorkingAttributes.ContentState).
@@ -727,6 +849,7 @@ final class EdgePanelState: ObservableObject {
                 title: "\(p.toolName) needs approval", body: body)
         }
         NtfyPusher.shared.pushPermission(id: p.id, tool: p.toolName, summary: body, risk: p.risk.rawValue)
+        TelegramPusher.shared.pushPermission(tool: p.toolName, summary: body, risk: p.risk.rawValue)
     }
 
     /// Push an "end" Live Activity update + alert when a session finishes — so the
@@ -738,6 +861,7 @@ final class EdgePanelState: ObservableObject {
             APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
         }
         NtfyPusher.shared.pushDone(title: title, detail: body)
+        TelegramPusher.shared.pushDone(title: title, detail: body)
     }
 
     func pushSessionEnded(_ s: LiveSession) {
@@ -766,7 +890,10 @@ final class EdgePanelState: ObservableObject {
                 if APNsPusher.shared.enabled, let dt {
                     APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
                 }
-                if elapsed >= 15 { NtfyPusher.shared.pushDone(title: title, detail: body) }
+                if elapsed >= 15 {
+                    NtfyPusher.shared.pushDone(title: title, detail: body)
+                    TelegramPusher.shared.pushDone(title: title, detail: body)
+                }
             }
         }
     }
