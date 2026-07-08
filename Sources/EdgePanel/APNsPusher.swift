@@ -112,7 +112,7 @@ final class APNsPusher: @unchecked Sendable {
         guard let config else { return }
         var payload: [String: Any] = ["aps": ["alert": ["title": title, "body": body], "sound": "default"]]
         if let qid = questionId { payload["questionId"] = qid }   // so the foreground app can dedup it
-        send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
+        send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert", expiresInSeconds: 3600)
     }
 
     /// Push an actionable "permission needed" alert (category PERMISSION → Allow/Deny
@@ -123,10 +123,10 @@ final class APNsPusher: @unchecked Sendable {
             "aps": ["alert": ["title": title, "body": body], "sound": "default",
                     "category": "PERMISSION", "mutable-content": 1],
             "permId": id]
-        send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert")
+        send(token: deviceToken, payload: payload, topic: config.bundleId, pushType: "alert", expiresInSeconds: 3600)
     }
 
-    private func send(token: String, payload: [String: Any], topic: String, pushType: String, priority: Int = 10) {
+    private func send(token: String, payload: [String: Any], topic: String, pushType: String, priority: Int = 10, expiresInSeconds: Int? = nil) {
         let host = config?.host ?? "api.sandbox.push.apple.com"
         guard let url = URL(string: "https://\(host)/3/device/\(token)"),
               let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
@@ -137,6 +137,13 @@ final class APNsPusher: @unchecked Sendable {
         req.setValue(topic, forHTTPHeaderField: "apns-topic")
         req.setValue(pushType, forHTTPHeaderField: "apns-push-type")
         req.setValue("\(priority)", forHTTPHeaderField: "apns-priority")
+        // apns-expiration: with no expiration APNs may deliver-once-or-discard, so a "done"/
+        // permission alert fired while the phone is briefly asleep or off-network can be dropped
+        // outright. A nonzero expiration tells APNs to STORE and re-deliver until then. Alerts pass
+        // now+1h; Live Activity updates leave it nil (stale progress shouldn't be retried later).
+        if let expiresInSeconds {
+            req.setValue("\(Int(Date().timeIntervalSince1970) + expiresInSeconds)", forHTTPHeaderField: "apns-expiration")
+        }
         URLSession.shared.dataTask(with: req) { data, resp, err in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             if code == 200 {
