@@ -376,7 +376,7 @@ struct PlanCard: View {
         let sev = sevColor(frac)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                RollingInt(value: Int(plan.fiveHourPct.rounded())).font(.claude(46, .bold)).foregroundColor(T.text)
+                RollingInt(value: Int(min(max(plan.fiveHourPct, 0), 1000).rounded())).font(.claude(46, .bold)).foregroundColor(T.text)
                 Text("%").font(.claude(24, .bold)).foregroundColor(T.text.opacity(0.55))
                 Spacer()
                 HStack(spacing: 5) {
@@ -821,7 +821,7 @@ struct WeeklyCard: View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "Weekly")
-                Text(plan.map { "\(Int($0.weekPct.rounded()))%" } ?? "—").font(.claude(24, .bold)).foregroundColor(T.text)
+                Text(plan.map { "\(Int(min(max($0.weekPct, 0), 1000).rounded()))%" } ?? "—").font(.claude(24, .bold)).foregroundColor(T.text)
                     .contentTransition(.numericText()).animation(Motion.number, value: plan?.weekPct)
                 Bar(frac: min(max((plan?.weekPct ?? 0) / 100, 0), 1), color: sevColor((plan?.weekPct ?? 0) / 100))
                     .animation(Motion.number, value: plan?.weekPct)
