@@ -31,11 +31,17 @@ final class UsageStore: ObservableObject {
     var onSessionEnded: ((LiveSession) -> Void)?
     // The interactive editor/CLI session you're watching ON this Mac — its "finished"
     // phone alert is suppressed (you don't need a ping for the chat on your screen).
-    // Cached so detectEnded() doesn't re-scan the filesystem every 2s.
+    // Cached so detectEnded() doesn't re-scan the filesystem on every 2s tick — but capped
+    // at 4s (two refreshSessions ticks), not 30s: a 30s cache meant switching which editor
+    // session you're watching left the spam gate pointed at the OLD session for up to 30s —
+    // a turn finishing on the old session was silently suppressed even though you'd already
+    // switched away, and a turn finishing on the new session spuriously pinged your phone for
+    // the chat now on your screen. 4s bounds that mismatch to the same order as the existing
+    // "really finished" debounce below.
     private var cachedInteractiveId: String?
     private var interactiveIdAt = Date.distantPast
     private func currentInteractiveId() -> String? {
-        if Date().timeIntervalSince(interactiveIdAt) > 30 {
+        if Date().timeIntervalSince(interactiveIdAt) > 4 {
             cachedInteractiveId = UsageLoader.mostRecentInteractiveSessionId()
             interactiveIdAt = Date()
         }

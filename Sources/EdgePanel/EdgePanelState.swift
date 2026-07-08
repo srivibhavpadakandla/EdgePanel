@@ -638,6 +638,13 @@ final class EdgePanelState: ObservableObject {
                 if strandedActivityToken { strandedActivityToken = false; strandedSince = nil }
                 activityPushTokens[sid] = token; lastActivityTokenAt = Date(); lastActivityTokenGeneration = gen
                 savePushTokens()
+                // The work this Island was started for may have ALREADY finished while we were
+                // waiting for the token (a short turn). If so, lastPushedWorkingIds is empty and
+                // nothing else will ever re-trigger the end (onWorkingChanged only fires on a
+                // CHANGE, and the empty set here is unchanged) — without this, the Island is stuck
+                // showing stale "working…" content forever. Send the done+end now that we finally
+                // have a token to send it with.
+                if lastPushedWorkingIds.isEmpty { sendIslandDone(token: token) }
                 NSLog("EdgePanel push token received: kind=\(kind) sid=\(sid) token=\(token.prefix(12))… (gen \(gen), current)")
             } else {
                 // A stale straggler from an OLDER push-to-start — never store it (it would clobber

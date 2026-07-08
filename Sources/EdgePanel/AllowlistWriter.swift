@@ -25,14 +25,32 @@ enum AllowlistWriter {
             // Never mint a wildcard grant for a privilege/wrapper command — "Bash(sudo *)"
             // would auto-allow EVERY sudo command. "" = re-ask sentinel.
             let wrappers: Set<String> = ["sudo", "doas", "env", "time", "nohup", "xargs", "exec",
-                                         "command", "nice", "ionice", "stdbuf", "setsid", "timeout", "eval"]
-            if wrappers.contains(first) { return "" }
-            let subcommanded = ["git", "npm", "pnpm", "yarn", "brew", "docker", "kubectl", "gh", "cargo", "pip", "pip3"]
+                                         "command", "nice", "ionice", "stdbuf", "setsid", "timeout", "eval",
+                                         "bash", "sh", "zsh", "dash", "ksh",
+                                         "python", "python3", "node", "ruby", "perl", "osascript", "php",
+                                         "awk", "gawk", "mawk", "nawk", "lua", "luajit", "tclsh", "wish"]
+            // Case-insensitive AND path/version-normalized: unlike RiskEngine, `first` here is NOT
+            // lowercased (its original case is needed below for the "Bash(<cmd> *)" rule text), so
+            // compare a normalized copy — else "Bash "/"Python3", "/usr/bin/python3", or
+            // "python3.11" would all slip past this check and mint a wildcard "always allow" grant
+            // for a full interpreter.
+            if wrappers.contains(normalizeInterpreterName(first)) { return "" }
+            let subcommanded = ["git", "npm", "pnpm", "yarn", "brew", "docker", "kubectl", "gh", "cargo", "pip", "pip3",
+                                "docker-compose", "podman-compose"]
             // tokens[1] must be a real subcommand, not a GLOBAL FLAG — "git -C /other status" or
             // "git -c core.pager=cat …" would otherwise mint "Bash(git -C *)" / "Bash(git -c *)",
             // a far broader grant than the user approved. A flag-led invocation falls through to
             // the tight-but-not-flag "Bash(git *)" instead.
+            // git push/reset/clean escalate to `.danger` via FLAGS ALONE (--force, --hard) on the
+            // same subcommand token a benign invocation already approved — approving "git push
+            // origin main" must not mint a wildcard that then silently covers "git push --force"
+            // (or "git reset --hard") without ever asking again. (docker/kubectl's destructive
+            // subcommands are separately-named — rm vs ps — and are alwaysDangerous, so they're
+            // already refused by the guard above; these three git subcommands are the only ones
+            // here where the identical token is either safe or danger purely by flag.)
+            let flagGatedDangerSubcommands: Set<String> = ["push", "reset", "clean"]
             if tokens.count >= 2, subcommanded.contains(first), !tokens[1].hasPrefix("-"), isSafeRuleToken(tokens[1]) {
+                if first == "git" && flagGatedDangerSubcommands.contains(tokens[1]) { return "" }
                 return "Bash(\(first) \(tokens[1]) *)"
             }
             return "Bash(\(first) *)"
@@ -52,6 +70,22 @@ enum AllowlistWriter {
 
     private static func isSafeRuleToken(_ s: String) -> Bool {
         !s.isEmpty && s.range(of: #"[()\n\r*]"#, options: .regularExpression) == nil
+    }
+
+    /// Strips a `./` prefix, directory path, and versioned-interpreter suffix (`python3.11` →
+    /// `python`) before comparing against `wrappers`, so a path-qualified or versioned invocation
+    /// can't dodge the interpreter-wrapper check. Mirrors RiskEngine.normalizeLeader, including its
+    /// `nodejs`→`node` alias and the `[-_]?` separator (`python-3.11`), so a name that dodges
+    /// RiskEngine's danger check via one of those aliases can't ALSO dodge this wrapper check and
+    /// get a wildcard "always allow" grant minted for a full interpreter.
+    private static func normalizeInterpreterName(_ tok: String) -> String {
+        let stripped = tok.hasPrefix("./") ? String(tok.dropFirst(2)) : tok
+        let base = (stripped as NSString).lastPathComponent.lowercased()
+        if base == "nodejs" { return "node" }
+        if base.range(of: #"^(python|ruby|perl|php)[-_]?[0-9][0-9.]*$"#, options: .regularExpression) != nil {
+            return String(base.prefix(while: { $0.isLetter }))
+        }
+        return base
     }
 
     @discardableResult

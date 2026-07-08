@@ -17,9 +17,10 @@ import CryptoKit
 struct APNsConfig {
     let teamId, keyId, bundleId, host: String
     let key: P256.Signing.PrivateKey
+    static let path = ("~/.edgepanel/apns.json" as NSString).expandingTildeInPath
 
     static func load() -> APNsConfig? {
-        let url = (("~/.edgepanel/apns.json" as NSString).expandingTildeInPath as String)
+        let url = path
         guard let data = FileManager.default.contents(atPath: url),
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let team = j["teamId"] as? String, let kid = j["keyId"] as? String,
@@ -37,7 +38,25 @@ struct APNsConfig {
 
 final class APNsPusher: @unchecked Sendable {
     static let shared = APNsPusher()
-    private let config = APNsConfig.load()
+    // Re-checked (cheap stat, not a re-parse+re-sign) on every push rather than loaded once at
+    // singleton init — see TelegramPusher's identical pattern for why: editing apns.json without a
+    // relaunch must not leave the channel silently stale. A SEPARATE lock from `lock` below (which
+    // guards the JWT cache / onInvalidToken and is already held across a `config` read at line
+    // ~149) — sharing one NSLock (non-reentrant) between both would deadlock. Doesn't invalidate
+    // `cachedJWT` on reload for the same reason (would need `lock`, unsafe to take here); a JWT
+    // signed under a rotated key just ages out naturally via its own 3000s TTL below.
+    private let configLock = NSLock()
+    private var cachedConfig: APNsConfig?
+    private var cachedConfigModDate: Date?
+    private var config: APNsConfig? {
+        configLock.lock(); defer { configLock.unlock() }
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: APNsConfig.path)[.modificationDate] as? Date) ?? nil
+        if modDate != cachedConfigModDate {
+            cachedConfig = APNsConfig.load()
+            cachedConfigModDate = modDate
+        }
+        return cachedConfig
+    }
     private var cachedJWT: (token: String, at: Date)?
     private let lock = NSLock()
 
@@ -130,6 +149,13 @@ final class APNsPusher: @unchecked Sendable {
                 // let a fresh push-to-start create the next Island.
                 if code == 410 || (code == 400 && body.contains("BadDeviceToken")) {
                     self.onInvalidToken?(token, pushType)
+                }
+                // 403 = the provider JWT itself was rejected (InvalidProviderToken/ExpiredProviderToken
+                // are the realistic causes here) — drop the cache so the NEXT push mints a fresh one,
+                // instead of resending the same rejected token for the remaining ~50min cache window
+                // and self-inflictedly failing every push until it naturally expires.
+                if code == 403 {
+                    self.lock.lock(); self.cachedJWT = nil; self.lock.unlock()
                 }
             }
         }.resume()

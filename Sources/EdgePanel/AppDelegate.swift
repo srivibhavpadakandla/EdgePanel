@@ -15,14 +15,25 @@ enum EdgePanelAuth {
         return t
     }
 
+    /// A random secret minted ONCE per process launch, folded into every action-token MAC.
+    /// Permission ids (`b1`, `b2`, …) come from an in-memory counter that resets to 0 on every
+    /// launch, so without this an `actionToken("b1","allow")` captured from the PUBLIC ntfy topic
+    /// would still validate against the NEXT launch's first (unrelated) permission — a replay that
+    /// force-approves a tool the user never saw. The per-launch salt makes the same id+decision
+    /// hash to a different token each launch, so a captured token dies with the process that minted
+    /// it. (Within a single launch ids never repeat and resolveRemote is single-use once resolved,
+    /// so there is no same-launch replay — this closes only the cross-launch window.)
+    private static let launchSalt = UUID().uuidString
+
     /// A scoped, single-permission action token: proves possession of the pairing token without
     /// ever transmitting it. ntfy.sh is a public third-party relay by default (the topic name is
     /// the only access control), so an action button embedding the RAW pairing token would hand
     /// anyone who reads that topic full LAN control (/chat, /open, /pushtoken, every route) —
-    /// this token can only ever resolve the ONE permission id + decision it was minted for.
+    /// this token can only ever resolve the ONE permission id + decision it was minted for, and
+    /// only within the launch that minted it (see launchSalt).
     static func actionToken(id: String, decision: String) -> String {
         let key = SymmetricKey(data: Data(pairingToken().utf8))
-        let mac = HMAC<SHA256>.authenticationCode(for: Data("\(id)|\(decision)".utf8), using: key)
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("\(launchSalt)|\(id)|\(decision)".utf8), using: key)
         return Data(mac).map { String(format: "%02x", $0) }.joined()
     }
 }

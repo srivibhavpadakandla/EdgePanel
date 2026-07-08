@@ -5,10 +5,13 @@
 //
 // GATED behind ~/.edgepanel/ntfy.json — absent ⇒ disabled:
 //   { "server": "https://ntfy.sh", "topic": "edgepanel-7f3k9q",
-//     "macHost": "100.98.159.7:8788", "token": "<pairing token>" }
-// server defaults to https://ntfy.sh. macHost + token let the action buttons reach
-// this Mac (use the Tailscale IP so it works off your LAN). The topic name is the
+//     "macHost": "100.98.159.7:8788" }
+// server defaults to https://ntfy.sh. macHost lets the action buttons reach this Mac
+// (use the Tailscale IP so it works off your LAN) — each button carries only a
+// scoped, single-permission action token (EdgePanelAuth.actionToken), never the raw
+// pairing token, since ntfy.sh is a public third-party relay. The topic name is the
 // only access control on the public server — keep it unguessable or self-host.
+// "token" is accepted for backward compat but no longer used or required.
 
 import Foundation
 
@@ -17,9 +20,9 @@ struct NtfyConfig {
     let topic: String
     let macHost: String?
     let token: String?
+    static let path = ("~/.edgepanel/ntfy.json" as NSString).expandingTildeInPath
 
     static func load() -> NtfyConfig? {
-        let path = ("~/.edgepanel/ntfy.json" as NSString).expandingTildeInPath
         guard let data = FileManager.default.contents(atPath: path),
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let topic = (j["topic"] as? String), !topic.isEmpty else { return nil }
@@ -32,7 +35,21 @@ struct NtfyConfig {
 
 final class NtfyPusher: @unchecked Sendable {
     static let shared = NtfyPusher()
-    private let config = NtfyConfig.load()
+    // Re-checked (cheap stat, not a re-parse) on every push rather than loaded once at singleton
+    // init — see TelegramPusher's identical pattern for why: editing ntfy.json without a relaunch
+    // must not leave the channel silently stale.
+    private let lock = NSLock()
+    private var cached: NtfyConfig?
+    private var cachedModDate: Date?
+    private var config: NtfyConfig? {
+        lock.lock(); defer { lock.unlock() }
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: NtfyConfig.path)[.modificationDate] as? Date) ?? nil
+        if modDate != cachedModDate {
+            cached = NtfyConfig.load()
+            cachedModDate = modDate
+        }
+        return cached
+    }
     var enabled: Bool { config != nil }
 
     /// "✓ project finished · 2m 14s · 26K tokens"
@@ -48,11 +65,14 @@ final class NtfyPusher: @unchecked Sendable {
             "message": summary.isEmpty ? "Tap Allow or Deny" : summary,
             "tags": [risk == "danger" ? "rotating_light" : "lock"],
             "priority": 5]
-        if let host = config?.macHost, let token = config?.token, !host.isEmpty, !token.isEmpty {
+        if let host = config?.macHost, !host.isEmpty {
             let url = "http://\(host)/permission/decide"
+            // A scoped per-action token (see EdgePanelAuth), NOT the raw pairing token — ntfy.sh
+            // is a public third-party relay by default, and the raw token would grant whoever
+            // reads that topic full LAN control instead of just this one permission decision.
             func action(_ label: String, _ decision: String) -> [String: Any] {
                 ["action": "http", "label": label, "url": url, "method": "POST",
-                 "headers": ["X-EdgePanel-Token": token],
+                 "headers": ["X-EdgePanel-Action-Token": EdgePanelAuth.actionToken(id: id, decision: decision)],
                  "body": "{\"id\":\"\(id)\",\"decision\":\"\(decision)\"}", "clear": true]
             }
             payload["actions"] = [action("Allow", "allow"), action("Deny", "deny"), action("Always", "always")]

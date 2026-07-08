@@ -13,9 +13,9 @@ import Foundation
 struct TelegramConfig {
     let token: String
     let chatId: String
+    static let path = ("~/.edgepanel/telegram.json" as NSString).expandingTildeInPath
 
     static func load() -> TelegramConfig? {
-        let path = ("~/.edgepanel/telegram.json" as NSString).expandingTildeInPath
         guard let data = FileManager.default.contents(atPath: path),
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = (j["token"] as? String), !token.isEmpty else { return nil }
@@ -30,7 +30,22 @@ struct TelegramConfig {
 
 final class TelegramPusher: @unchecked Sendable {
     static let shared = TelegramPusher()
-    private let config = TelegramConfig.load()
+    // Re-checked (cheap stat, not a re-parse) on every push rather than loaded once at singleton
+    // init: EdgePanel is a long-running menu-bar app, so writing/editing telegram.json (e.g.
+    // pairing the bot for the first time, or fixing a typo'd chatId) without restarting the app
+    // would otherwise leave this channel silently disabled/stale until the next relaunch.
+    private let lock = NSLock()
+    private var cached: TelegramConfig?
+    private var cachedModDate: Date?
+    private var config: TelegramConfig? {
+        lock.lock(); defer { lock.unlock() }
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: TelegramConfig.path)[.modificationDate] as? Date) ?? nil
+        if modDate != cachedModDate {
+            cached = TelegramConfig.load()
+            cachedModDate = modDate
+        }
+        return cached
+    }
     var enabled: Bool { config != nil }
 
     /// "✓ project finished · 2m 14s · 26K tokens"

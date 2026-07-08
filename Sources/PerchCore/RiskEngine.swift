@@ -64,6 +64,56 @@ public enum RiskEngine {
         "nice", "ionice", "stdbuf", "setsid", "timeout", "sudo", "doas",
     ]
 
+    /// Binaries that execute a NESTED command we cannot statically see the risk of (a remote
+    /// host, container, other session/process) — unlike `wrappers`, these are NOT transparent:
+    /// the real dangerous verb after them is invisible to every leader-gated check below, so we
+    /// treat invoking them at all as always-dangerous rather than trying to parse each one's
+    /// distinct nested-command syntax (ssh's is "everything after the first non-flag arg",
+    /// docker exec's is "everything after the container name", su's is after `-c`, etc.).
+    /// docker/kubectl are deliberately NOT here — they have too many benign non-exec subcommands
+    /// (ps/images/logs/get pods/...) to blanket-flag; they get their own narrower exec/destructive
+    /// classification below instead.
+    private static let opaqueExec: Set<String> = [
+        "ssh", "su", "flock", "chroot", "screen", "tmux", "rsh", "rlogin",
+        "script", "nsenter", "unshare", "expect", "gdb", "lldb", "strace", "dtrace",
+    ]
+
+    /// Rewrites `${IFS}` / `$IFS` word-separator references — including substring/offset/case
+    /// forms like `${IFS:0:1}`, `${IFS: -1}`, `${IFS,,}` (a common tokenizer-bypass trick:
+    /// `rm${IFS}-rf${IFS}~` has no real whitespace for a naive split to find) — to a real space,
+    /// so every downstream regex/leader check sees the command the shell would actually run.
+    /// Applied once, up front, before any other parsing.
+    private static func normalizeSeparators(_ cmd: String) -> String {
+        // Two disjoint alternatives, NOT one optional-everything pattern: the braced form
+        // requires and consumes through a literal closing `}` (so `${IFS:0:1}`/`${IFS,,}` still
+        // work); the bare form matches ONLY the 4-char `$ifs` token with no trailing consumption.
+        // A single alternation-free `\$\{?ifs\b[^}]*\}?` previously let the greedy `[^}]*` run
+        // unbounded whenever $ifs was used WITHOUT braces (the most common form), deleting the
+        // rest of the statement instead of converting it to a space — e.g. `rm$IFS-rf$IFS~`
+        // collapsed to `"rm "`, silently erasing the `-rf`/`~` the recursive-delete check needs.
+        cmd.replacingOccurrences(of: #"\$\{ifs\b[^}]*\}|\$ifs\b"#, with: " ", options: .regularExpression)
+    }
+
+    /// Strips a `./` prefix, directory path, and versioned-interpreter suffix (`python3.11` →
+    /// `python`) from a command-position token before it's tested against `wrappers`/`opaqueExec`/
+    /// any leader set — so `/usr/bin/sudo`, `./sudo`, and `python3.11` all collapse to the same
+    /// leader as a bare `sudo`/`python` invocation instead of silently missing every check.
+    /// Also aliases distinct-binary-name variants to their canonical leader: `docker-compose`/
+    /// `podman-compose` → `docker` (so the docker/kubectl danger branch still applies), and
+    /// `nodejs` (Debian/Ubuntu's actual Node.js binary name) → `node`.
+    private static func normalizeLeader(_ tok: String) -> String {
+        let stripped = tok.hasPrefix("./") ? String(tok.dropFirst(2)) : tok
+        let base = (stripped as NSString).lastPathComponent
+        if base == "docker-compose" || base == "docker_compose" || base == "podman-compose" || base == "podman"
+            || base == "nerdctl" || base == "crictl" { return "docker" }
+        if base == "oc" { return "kubectl" }
+        if base == "nodejs" { return "node" }
+        if base.range(of: #"^(python|ruby|perl|php)[-_]?[0-9][0-9.]*$"#, options: .regularExpression) != nil {
+            return String(base.prefix(while: { $0.isLetter }))
+        }
+        return base
+    }
+
     /// The command-position tokens of each `;`/`&`/`|`/newline/subshell segment:
     /// every wrapper it passes through PLUS the first real command. Env-var
     /// assignments (FOO=bar) are skipped. Lets us detect `time rm`, `FOO=1 rm`,
@@ -72,18 +122,43 @@ public enum RiskEngine {
         var result: Set<String> = []
         for seg in cmd.split(whereSeparator: { ";&|\n`()".contains($0) }) {
             var passedWrapper = false
-            for tok in seg.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) {
-                if tok.range(of: #"^\w+=.*"#, options: .regularExpression) != nil { continue }  // env assignment
-                if wrappers.contains(tok) { result.insert(tok); passedWrapper = true; continue }
+            for tok in shellTokens(seg) {
+                if tok.range(of: #"^\w+=.*"#, options: .regularExpression) != nil { continue }  // env assignment (quote-aware — see shellTokens)
+                let leaf = normalizeLeader(tok)   // path/version-stripped, so /usr/bin/sudo etc. still match
+                if wrappers.contains(leaf) { result.insert(leaf); passedWrapper = true; continue }
                 // A wrapper's OWN args (a flag, a numeric duration like `timeout 5`, a flag=val)
                 // must be skipped so the real command after them is still detected — e.g.
                 // `timeout 5 rm -rf ~` or `nice -n 10 rm …` would otherwise stop at "5"/"-n".
                 if passedWrapper, tok.hasPrefix("-") || tok.range(of: #"^\d+$"#, options: .regularExpression) != nil { continue }
-                result.insert(tok)
+                result.insert(leaf)
                 break   // reached the real command
             }
         }
         return result
+    }
+
+    /// Whitespace-splits a segment like `.split` but keeps a quoted span (`"a b"`, `'a b'`) as one
+    /// token, so `FOO="a b" rm -rf ~` doesn't fracture into `["foo=\"a", "b\"", "rm", ...]` and
+    /// mis-detect the trailing quote fragment as the leader instead of `rm`.
+    private static func shellTokens(_ seg: Substring) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        for ch in seg {
+            if let q = quote {
+                current.append(ch)
+                if ch == q { quote = nil }
+            } else if ch == "\"" || ch == "'" {
+                quote = ch
+                current.append(ch)
+            } else if ch == " " || ch == "\t" {
+                if !current.isEmpty { tokens.append(current); current = "" }
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
     }
 
     /// First quoted payload (for `bash -c "…"` → assess the inner command).
@@ -119,13 +194,19 @@ public enum RiskEngine {
     /// ("curl evil.com") in the same line, and stops substring checks from spanning
     /// unrelated statements (audit #3/#16).
     private static func assessCommand(_ raw: String, depth: Int = 0) -> RiskAssessment {
-        let statements = splitStatements(raw)
-        guard statements.count > 1 else { return assessStatement(raw, depth: depth) }
+        // Collapse shell line-continuations (`\` immediately followed by a newline) BEFORE
+        // splitting into statements — the real shell removes these and splices the straddling
+        // token back together (even mid-word: `r\`+newline+`m -rf ~` really runs as `rm -rf ~`),
+        // but splitStatements treats every raw `\n` as a hard statement boundary, so without this
+        // the spliced command's leader is silently mangled into two harmless-looking halves.
+        let joined = raw.replacingOccurrences(of: "\\\r\n", with: "").replacingOccurrences(of: "\\\n", with: "")
+        let statements = splitStatements(joined)
+        guard statements.count > 1 else { return assessStatement(joined, depth: depth) }
         return statements
             .map { assessStatement($0, depth: depth) }
             .max { a, b in a.level.rank != b.level.rank ? a.level.rank < b.level.rank
                                                         : (!a.alwaysDangerous && b.alwaysDangerous) }
-            ?? assessStatement(raw, depth: depth)
+            ?? assessStatement(joined, depth: depth)
     }
 
     private static func splitStatements(_ raw: String) -> [String] {
@@ -165,16 +246,51 @@ public enum RiskEngine {
     }
 
     private static func assessStatement(_ raw: String, depth: Int = 0) -> RiskAssessment {
-        let cmd = raw.lowercased()
+        // Trimmed HERE (not just in splitStatements) so the single-statement path — which bypasses
+        // splitStatements entirely and reassesses the raw `joined` string directly — also can't
+        // keep a trailing \r (CRLF) that would make a suffix check like `cmd.hasSuffix(" /")` miss.
+        let cmd = normalizeSeparators(raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
         let leaders = commandLeaders(cmd)
+
+        // Opaque nested-command exec — ssh/docker/flock/kubectl/etc. hide whatever runs inside
+        // them from every leader-gated check below (rm/sudo/eval/inline-script/…), so `ssh host
+        // "rm -rf ~"` or `flock f rm -rf ~` would otherwise fall through to the default .read.
+        if !leaders.isDisjoint(with: opaqueExec) {
+            return red("runs a command inside another host/container/session (unauditable)", always: true)
+        }
 
         // Pipe-to-shell/interpreter — the classic remote-exec footgun. A pipe into a shell or an
         // interpreter that runs stdin AS CODE executes arbitrary fetched/decoded code (curl|sh,
         // base64 -d|sh, curl x.py|python, …|node|ruby, bash -s). The negative lookaheads exclude the
         // interpreter processing stdin as DATA — `-m <module>`, `-l` (lint), or a script-file arg
         // (python -m json.tool, php -l, ruby foo.rb) — which are common and benign.
-        if cmd.range(of: #"\|\s*(sh|bash|zsh|dash|ksh|python3?|node|ruby|perl|php)\b(?!\s+-(m|l)\b)(?!\s+[^\s|;&<>]*\.[a-z])"#, options: .regularExpression) != nil {
+        // (?:[\w./-]*/)? allows a path-qualified interpreter (`/bin/bash`, `/usr/bin/python3`)
+        // right after the pipe — a bare name-only match let `curl … | /bin/bash` slip through
+        // since a literal `/` sat between `|` and the interpreter name. node(?:js)? also matches
+        // `nodejs`, the actual Node.js binary name on Debian/Ubuntu. [\d.]* after the versioned
+        // interpreters allows a glued-on version (python3.11). The (?=\s|$|[;&|<>)`'"]) terminator
+        // (rather than a bare \b) requires the match to be the WHOLE final path component, not
+        // just a prefix of it — a plain \b let `tools/sh-format.py` or `scripts/bash-lint.sh`
+        // falsely match on the leading "sh"/"bash" substring of an unrelated script name. The
+        // terminator class MUST include `)`/backtick/quotes, not just whitespace/`;&|<>` — command
+        // substitution `$(curl x|sh)`, a bare subshell `(curl x|sh)`, and backtick substitution
+        // both put a `)` or backtick immediately after the interpreter name, and omitting them from
+        // the class let these extremely common shell idioms slip past entirely (a bare `\b` used
+        // to catch this; tightening the terminator to fix the sh-format.py false positive
+        // regressed it for these three idioms).
+        if cmd.range(of: #"\|\s*(?:[\w./-]*/)?(sh|bash|zsh|dash|ksh|python3?[\d.]*|node(?:js)?|ruby[\d.]*|perl[\d.]*|php[\d.]*)(?=\s|$|[;&|<>)`'"])(?!\s+-(m|l)\b)(?!\s+[^\s|;&<>]*\.[a-z])"#, options: .regularExpression) != nil {
             return red("pipes into a shell/interpreter", always: true)
+        }
+        // Process substitution (`bash <(curl ...)`) feeds fetched/dynamic content into a shell or
+        // interpreter exactly like a pipe does, without ever producing the literal `|` the check
+        // above looks for. Leader-gated (via the already-normalized `leaders` set, which strips
+        // paths/versions) rather than a bare substring regex — a plain `\b(sh|bash|...)\s+<\(`
+        // matched any script merely ENDING in "sh"/"bash" before a process-substitution argument,
+        // e.g. the common autoconf `install-sh <(diff a b)`, misclassifying the real command
+        // (install-sh, not sh) as piping into a shell.
+        let procSubInterpreters: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "source", "python", "python3", "node", "ruby", "perl", "php"]
+        if !leaders.isDisjoint(with: procSubInterpreters), cmd.contains("<(") {
+            return red("feeds a process substitution into a shell/interpreter (equivalent to piping into it)", always: true)
         }
         // Fork bomb / disk wipe.
         if cmd.contains(":(){") { return red("fork bomb", always: true) }
@@ -187,7 +303,9 @@ public enum RiskEngine {
         }
         // Inline code execution — can do anything, so always surface.
         if !leaders.isDisjoint(with: ["python", "python3", "node", "ruby", "perl", "osascript", "php"]),
-           cmd.range(of: #"\s-(c|e)\b"#, options: .regularExpression) != nil {
+           cmd.range(of: #"\s-(c|e)\b"#, options: .regularExpression) != nil
+               || cmd.range(of: #"\s--eval\b"#, options: .regularExpression) != nil
+               || (leaders.contains("php") && cmd.range(of: #"\s-r\b"#, options: .regularExpression) != nil) {
             return red("runs an inline script", always: true)
         }
         if leaders.contains("eval") { return red("evaluates a dynamic command", always: true) }
@@ -203,7 +321,9 @@ public enum RiskEngine {
         // (not just the first) and take the MOST severe, so a decoy quote can't mask the real
         // payload (e.g. `bash -c 'rm -rf ~' "ok"` must not be judged by "ok").
         if depth < 3, !leaders.isDisjoint(with: ["bash", "sh", "zsh", "dash", "ksh"]),
-           cmd.range(of: #"\s-c\b"#, options: .regularExpression) != nil {
+           cmd.split(whereSeparator: { $0 == " " || $0 == "\t" }).contains(where: { tok in
+               tok.hasPrefix("-") && !tok.hasPrefix("--") && tok.contains("c")
+           }) {
             let spans = quotedPayloads(raw)
             if !spans.isEmpty {
                 let assessed = spans.map { assessCommand($0, depth: depth + 1) }
@@ -229,6 +349,11 @@ public enum RiskEngine {
             let force = cmd.contains("--force") || cmd.contains("--force-with-lease")
                 || cmd.range(of: #"\s-f(\s|$)"#, options: .regularExpression) != nil
                 || cmd.range(of: #"(^|\s)\+[\w./-]+"#, options: .regularExpression) != nil
+            // Deletes = --delete/-d, or an empty-source colon refspec (`git push origin :main`) —
+            // removes the ref on the remote outright, at least as destructive as a force-push.
+            let deletes = cmd.range(of: #"\s--delete\b"#, options: .regularExpression) != nil
+                || cmd.range(of: #"\s-d(\s|$)"#, options: .regularExpression) != nil
+                || cmd.range(of: #"(^|\s):[\w./-]+"#, options: .regularExpression) != nil
             // Protected = a WHOLE ref token equal to a protected branch (so "prod-spike" or
             // "maintenance" don't match), checking the destination of a src:dst refspec too.
             let protectedRefs: Set<String> = ["main", "master", "prod", "production", "release"]
@@ -240,11 +365,29 @@ public enum RiskEngine {
                     return parts.map { ($0 as NSString).lastPathComponent }   // refs/heads/main → main
                 }
             let protected = refTokens.contains { protectedRefs.contains($0) }
-            if force && protected { return red("force-push to a protected branch", always: true) }
+            if (force || deletes) && protected { return red("force-push / deletes a protected branch", always: true) }
             if force { return red("force-push") }
+            if deletes { return red("deletes a remote branch/ref") }
             return amber("pushes to a remote")
         }
         if (gitSub == "reset" && cmd.contains("--hard")) || gitSub == "clean" { return red("discards uncommitted work") }
+        // Container / cluster destructive actions — docker/kubectl have no git-style safety net,
+        // so a delete/prune/rm can irreversibly wipe containers, images, volumes, or workloads.
+        if !leaders.isDisjoint(with: ["docker", "kubectl"]) {
+            // exec/run/attach/debug hide an arbitrary nested command or interactive session the
+            // same way ssh does — genuinely opaque, unlike docker/kubectl's many benign
+            // subcommands (ps/images/logs/get pods/...), which is why docker/kubectl aren't in
+            // the blanket opaqueExec set above.
+            // rsh: OpenShift's `oc rsh <pod>` opens a remote shell in a pod's container — same
+            // opaque-nested-session risk as exec/attach, just under oc's own subcommand name.
+            if cmd.range(of: #"\b(exec|run|attach|debug|rsh)\b"#, options: .regularExpression) != nil {
+                return red("runs a command inside another host/container/session (unauditable)", always: true)
+            }
+            if cmd.range(of: #"\b(rm|rmi|prune|delete|drain|cordon)\b"#, options: .regularExpression) != nil
+                || cmd.contains("compose down") {
+                return red("removes containers/images/volumes/workloads", always: true)
+            }
+        }
         // System paths.
         if cmd.range(of: #">\s*/(etc|usr|bin|sbin|system|library)"#, options: .regularExpression) != nil
             || cmd.range(of: #"\b(chmod|chown)\b.*\s/(etc|usr|bin|sbin|system)"#, options: .regularExpression) != nil {
@@ -278,6 +421,14 @@ public enum RiskEngine {
         // loopback host is the actual TARGET (host position) AND there's no external
         // http(s) URL — so "localhost" buried in a path/query of an external URL can't
         // downgrade a real egress.
+        // Remote copy (scp/rsync/sftp) — ships local files/directories to a remote host over the
+        // network exactly like curl --upload-file/-d @file; must not be rated below curl/wget.
+        if !leaders.isDisjoint(with: ["scp", "rsync", "sftp"]) {
+            if Self.touchesSensitivePath(cmd) {
+                return red("copies a credential/persistence file to a remote host", always: true)
+            }
+            return amber("copies files to/from a remote host")
+        }
         if cmd.contains("curl ") || cmd.contains("wget ") {
             let loopbackHost = cmd.range(of: #"(://|@|\s|=)(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?([/\s"']|$)"#, options: .regularExpression) != nil
             let externalURL = cmd.range(of: #"https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])"#, options: .regularExpression) != nil
@@ -286,7 +437,7 @@ public enum RiskEngine {
             // it), so it can't take the calm "local request" downgrade. cmd is already
             // lowercased, so match long flags + the @file marker (case-safe — curl's -F/-T/-d
             // collide with -f/-t case-folded).
-            let sendsData = cmd.range(of: #"(--data\b|--data-[a-z]+\b|--upload-file\b|--form\b|--post-file\b|--post-data\b|--request\s+(post|put)|\s-d\s*@|=@)"#, options: .regularExpression) != nil
+            let sendsData = cmd.range(of: #"(--data\b|--data-[a-z]+\b|--upload-file\b|--form\b|--post-file\b|--post-data\b|--request\s+(post|put)|\s-d\s*@|=@|\s-t\s+\S|\$\(|`)"#, options: .regularExpression) != nil
             if loopbackHost && !externalURL && !sendsData {
                 return RiskAssessment(level: .read, reason: "local request", alwaysDangerous: false)
             }
@@ -309,7 +460,13 @@ public enum RiskEngine {
         let p = (path as NSString).expandingTildeInPath
         let lower = p.lowercased()
         let inSystem = lower.hasPrefix("/etc") || lower.hasPrefix("/usr") || lower.hasPrefix("/system") || lower.hasPrefix("/library") || lower.hasPrefix("/private/etc")
-        let inWorkspace = cwd.map { p.hasPrefix(($0 as NSString).expandingTildeInPath) } ?? false
+        // Boundary-checked (not a bare hasPrefix), matching the underHome convention used below —
+        // else a sibling directory sharing the cwd as a text prefix (cwd=/Users/bob/project,
+        // path=/Users/bob/project-secrets/x) would wrongly read as "inWorkspace".
+        let inWorkspace: Bool = cwd.map { c in
+            let cw = (c as NSString).expandingTildeInPath
+            return p == cw || p.hasPrefix(cw + "/")
+        } ?? false
         let writing = tool.contains("write") || tool.contains("edit") || tool.contains("create")
             || tool.contains("move") || tool.contains("rename")   // move/rename mutate the filesystem
 
@@ -359,9 +516,15 @@ public enum RiskEngine {
                     "/library/launchagents", "/library/launchdaemons"]
         func hit(_ rel: String) -> Bool {
             for base in ["~" + rel, "$home" + rel, "${home}" + rel, home + rel] {
-                guard let r = cmd.range(of: base) else { continue }
-                let after = cmd[r.upperBound...].first
-                if after == nil || after == "/" || after == "." || after == " " || after == "\"" || after == "'" { return true }
+                // Scan EVERY occurrence, not just the first: `cat ~/.sshx ~/.ssh/id_rsa` has a
+                // decoy match (~/.sshx, non-boundary) before the real hit — stopping at the first
+                // range(of:) would return false and miss the credential read entirely.
+                var searchRange = cmd.startIndex..<cmd.endIndex
+                while let r = cmd.range(of: base, range: searchRange) {
+                    let after = cmd[r.upperBound...].first
+                    if after == nil || after == "/" || after == "." || after == " " || after == "\"" || after == "'" { return true }
+                    searchRange = r.upperBound..<cmd.endIndex
+                }
             }
             return false
         }
