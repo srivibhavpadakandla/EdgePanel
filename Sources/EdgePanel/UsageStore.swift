@@ -104,7 +104,7 @@ final class UsageStore: ObservableObject {
         load()
         loadPlan()
         timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in self?.load() }
-        planTimer = Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in self?.loadPlan() }
+        planTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.loadPlan() }
         // Keep the working sessions + tokens fresh (cheap: tail-reads recent files).
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshSessions() }
     }
@@ -387,21 +387,31 @@ final class UsageStore: ObservableObject {
     private func checkUsageAlert(_ p: PlanUsage) {
         let pct = p.fiveHourPct
         guard pct.isFinite else { return }   // non-finite (corrupted plan.json) → would trap Int(inf)
-        // Re-arm when the 5-hour window resets (new reset time) OR on a clear pct drop — so the
-        // 80/90 alerts fire again next window even if usage was still low at the reset moment.
-        if p.fiveHourReset != lastUsageReset || pct < usageLastPct - 5 {
+        // Re-arm the whole set ONLY when the 5-hour window actually rolls to a new one (new reset
+        // time). The previous version ALSO re-armed on any >5% dip in pct — but near the cap the
+        // rolling-window % naturally oscillates (e.g. 96→90→95 as old usage ages out of the
+        // 5-hour window), so every dip cleared the dedup and the 80/90 alerts re-fired on each
+        // bounce. That was the spam.
+        if p.fiveHourReset != lastUsageReset {
             usageAlerted.removeAll(); usageForecastAlerted = false
             UserDefaults.standard.set([Int](), forKey: "edgepanel.usageAlerted")
         }
         lastUsageReset = p.fiveHourReset
         usageLastPct = pct
         UserDefaults.standard.set(p.fiveHourReset, forKey: "edgepanel.usageReset")
-        for thr in [80, 90] where pct >= Double(thr) && !usageAlerted.contains(thr) {
-            usageAlerted.insert(thr)
-            UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted")
-            onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
-                          "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
+        var alertsChanged = false
+        for thr in [80, 90] {
+            // Per-threshold hysteresis: a fired threshold re-arms only once usage falls CLEARLY
+            // below it (thr − 8), never on a small wobble around the line — so a % bouncing near
+            // the cap can't re-trigger an alert it already sent this window.
+            if pct < Double(thr) - 8, usageAlerted.remove(thr) != nil { alertsChanged = true }
+            if pct >= Double(thr), !usageAlerted.contains(thr) {
+                usageAlerted.insert(thr); alertsChanged = true
+                onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
+                              "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
+            }
         }
+        if alertsChanged { UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted") }
         if let hit = limitClock {
             let mins = hit.timeIntervalSinceNow / 60
             if mins > 0, mins <= 45, pct >= 50, !usageForecastAlerted {
