@@ -400,15 +400,24 @@ final class UsageStore: ObservableObject {
         usageLastPct = pct
         UserDefaults.standard.set(p.fiveHourReset, forKey: "edgepanel.usageReset")
         var alertsChanged = false
-        for thr in [80, 90] {
+        for thr in [80, 90, 100] {
             // Per-threshold hysteresis: a fired threshold re-arms only once usage falls CLEARLY
             // below it (thr − 8), never on a small wobble around the line — so a % bouncing near
             // the cap can't re-trigger an alert it already sent this window.
             if pct < Double(thr) - 8, usageAlerted.remove(thr) != nil { alertsChanged = true }
             if pct >= Double(thr), !usageAlerted.contains(thr) {
                 usageAlerted.insert(thr); alertsChanged = true
-                onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
-                              "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
+                if thr >= 100 {
+                    // The "you've actually hit it" alert — fires ONCE at 100% (the dedup + reset-only
+                    // re-arm above keep it single, so hitting the cap doesn't spam).
+                    let resets = p.fiveHourReset.map {
+                        " Resets \(DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short))."
+                    } ?? ""
+                    onUsageAlert?("🛑 5-hour limit reached", "You've hit your 5-hour usage cap.\(resets)")
+                } else {
+                    onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
+                                  "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
+                }
             }
         }
         if alertsChanged { UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted") }
