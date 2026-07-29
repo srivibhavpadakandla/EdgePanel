@@ -133,7 +133,7 @@ final class UsageStore: ObservableObject {
             DispatchQueue.main.async {
                 if let mode, mode != self.lastMode { self.lastMode = mode; self.onModeChanged?(mode) }
                 if (eff ?? "") != self.lastEffort { self.lastEffort = eff ?? ""; self.onEffortChanged?(eff) }
-                // Track the live editor session (cheap: id cached 30s; cwd resolved only on change).
+                // Track the live editor session (cheap: id cached 4s; cwd resolved only on change).
                 let eid = self.currentInteractiveId()
                 if eid != self.editorSessionId {
                     self.editorSessionId = eid
@@ -381,35 +381,39 @@ final class UsageStore: ObservableObject {
     // PERSISTED across launches so a Mac restart at ≥80% doesn't re-fire the push (the threshold
     // was already alerted this window); re-arms only when the window actually resets.
     private var usageAlerted: Set<Int> = Set(UserDefaults.standard.array(forKey: "edgepanel.usageAlerted") as? [Int] ?? [])
-    private var usageLastPct = 0.0
     private var usageForecastAlerted = false
     private var lastUsageReset: Date? = UserDefaults.standard.object(forKey: "edgepanel.usageReset") as? Date
     private func checkUsageAlert(_ p: PlanUsage) {
         let pct = p.fiveHourPct
         guard pct.isFinite else { return }   // non-finite (corrupted plan.json) → would trap Int(inf)
-        // Re-arm the whole set ONLY when the 5-hour window actually rolls to a new one (new reset
-        // time). The previous version ALSO re-armed on any >5% dip in pct — but near the cap the
-        // rolling-window % naturally oscillates (e.g. 96→90→95 as old usage ages out of the
-        // 5-hour window), so every dip cleared the dedup and the 80/90 alerts re-fired on each
-        // bounce. That was the spam.
-        if p.fiveHourReset != lastUsageReset {
-            usageAlerted.removeAll(); usageForecastAlerted = false
-            UserDefaults.standard.set([Int](), forKey: "edgepanel.usageAlerted")
+        // Re-arm the whole 80/90/100 dedup set ONLY on a TRUE window roll: both the new and the
+        // previous reset are present AND differ. Two things this guards:
+        //  • the previous version re-armed on any >5% pct dip, but near the cap the rolling-window
+        //    % oscillates (96→90→95 as old usage ages out), so every dip re-fired the alerts — spam;
+        //  • a bare `!=` ALSO treats a nil⇄date edge as a roll, but a 200 response can carry a real
+        //    high pct with a nil reset (resets_at absent/unparseable), so an intermittently-missing
+        //    timestamp would re-fire 80/90/100 on every flap and a persistently-nil one would clear
+        //    the dedup forever. When reset is nil we HOLD the dedup + last-reset unchanged.
+        if let reset = p.fiveHourReset {
+            if reset != lastUsageReset {
+                usageAlerted.removeAll(); usageForecastAlerted = false
+                UserDefaults.standard.set([Int](), forKey: "edgepanel.usageAlerted")
+            }
+            lastUsageReset = reset
+            UserDefaults.standard.set(reset, forKey: "edgepanel.usageReset")
         }
-        lastUsageReset = p.fiveHourReset
-        usageLastPct = pct
-        UserDefaults.standard.set(p.fiveHourReset, forKey: "edgepanel.usageReset")
         var alertsChanged = false
         for thr in [80, 90, 100] {
-            // Per-threshold hysteresis: a fired threshold re-arms only once usage falls CLEARLY
-            // below it (thr − 8), never on a small wobble around the line — so a % bouncing near
-            // the cap can't re-trigger an alert it already sent this window.
-            if pct < Double(thr) - 8, usageAlerted.remove(thr) != nil { alertsChanged = true }
+            // Per-threshold hysteresis for the 80/90 WARNINGS: each re-arms only once usage falls
+            // CLEARLY below it (thr − 8), never on a small wobble. The 100 "limit reached" alert is
+            // terminal — it LATCHES until an actual window roll (never re-armed by hysteresis), so a
+            // >8-point rolling-window dip then re-cross (100→91→100) can't re-fire it.
+            if thr != 100, pct < Double(thr) - 8, usageAlerted.remove(thr) != nil { alertsChanged = true }
             if pct >= Double(thr), !usageAlerted.contains(thr) {
                 usageAlerted.insert(thr); alertsChanged = true
                 if thr >= 100 {
-                    // The "you've actually hit it" alert — fires ONCE at 100% (the dedup + reset-only
-                    // re-arm above keep it single, so hitting the cap doesn't spam).
+                    // The "you've actually hit it" alert — fires ONCE when you cross 100% and
+                    // latches until the window rolls (see the `thr != 100` hysteresis skip above).
                     let resets = p.fiveHourReset.map {
                         " Resets \(DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short))."
                     } ?? ""
@@ -429,8 +433,11 @@ final class UsageStore: ObservableObject {
                 onUsageAlert?("⏳ On track to hit your 5-hour cap",
                               "At this pace, around \(t). Ease off or pause autonomous tasks.")
             }
-            if mins > 60 || mins <= 0 { usageForecastAlerted = false }
-        } else { usageForecastAlerted = false }
+        }
+        // usageForecastAlerted re-arms only on a true window roll (cleared with the threshold set
+        // above), NOT when limitClock momentarily goes nil: the burn projection flaps in and out of
+        // "will hit before reset" on small rate changes, and clearing on each nil re-fired the
+        // forecast repeatedly for one continuous approach.
     }
 
     private func applyPlanFailure() {
