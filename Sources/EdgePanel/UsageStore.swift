@@ -386,45 +386,29 @@ final class UsageStore: ObservableObject {
     private func checkUsageAlert(_ p: PlanUsage) {
         let pct = p.fiveHourPct
         guard pct.isFinite else { return }   // non-finite (corrupted plan.json) → would trap Int(inf)
-        // Re-arm the whole 80/90/100 dedup set ONLY on a TRUE window roll: both the new and the
-        // previous reset are present AND differ. Two things this guards:
-        //  • the previous version re-armed on any >5% pct dip, but near the cap the rolling-window
-        //    % oscillates (96→90→95 as old usage ages out), so every dip re-fired the alerts — spam;
-        //  • a bare `!=` ALSO treats a nil⇄date edge as a roll, but a 200 response can carry a real
-        //    high pct with a nil reset (resets_at absent/unparseable), so an intermittently-missing
-        //    timestamp would re-fire 80/90/100 on every flap and a persistently-nil one would clear
-        //    the dedup forever. When reset is nil we HOLD the dedup + last-reset unchanged.
-        if let reset = p.fiveHourReset {
-            if reset != lastUsageReset {
-                usageAlerted.removeAll(); usageForecastAlerted = false
-                UserDefaults.standard.set([Int](), forKey: "edgepanel.usageAlerted")
-            }
-            lastUsageReset = reset
-            UserDefaults.standard.set(reset, forKey: "edgepanel.usageReset")
-        }
-        var alertsChanged = false
-        for thr in [80, 90, 100] {
-            // Per-threshold hysteresis for the 80/90 WARNINGS: each re-arms only once usage falls
-            // CLEARLY below it (thr − 8), never on a small wobble. The 100 "limit reached" alert is
-            // terminal — it LATCHES until an actual window roll (never re-armed by hysteresis), so a
-            // >8-point rolling-window dip then re-cross (100→91→100) can't re-fire it.
-            if thr != 100, pct < Double(thr) - 8, usageAlerted.remove(thr) != nil { alertsChanged = true }
-            if pct >= Double(thr), !usageAlerted.contains(thr) {
-                usageAlerted.insert(thr); alertsChanged = true
-                if thr >= 100 {
-                    // The "you've actually hit it" alert — fires ONCE when you cross 100% and
-                    // latches until the window rolls (see the `thr != 100` hysteresis skip above).
-                    let resets = p.fiveHourReset.map {
-                        " Resets \(DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short))."
-                    } ?? ""
-                    onUsageAlert?("🛑 5-hour limit reached", "You've hit your 5-hour usage cap.\(resets)")
-                } else {
-                    onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
-                                  "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
-                }
+        // Pure dedup decision (reset-roll re-arm, 80/90 hysteresis, 100% latch — see
+        // UsageMath.usageAlertStep); this method only performs the resulting side effects.
+        let outcome = UsageMath.usageAlertStep(pct: pct, reset: p.fiveHourReset,
+                                               lastReset: lastUsageReset, alerted: usageAlerted)
+        if outcome.windowRolled { usageForecastAlerted = false }   // re-arm the forecast on a real roll
+        usageAlerted = outcome.alerted
+        lastUsageReset = outcome.newLastReset
+        UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted")
+        if let reset = p.fiveHourReset { UserDefaults.standard.set(reset, forKey: "edgepanel.usageReset") }
+        for thr in outcome.fires {
+            if thr >= 100 {
+                let resets = p.fiveHourReset.map {
+                    " Resets \(DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short))."
+                } ?? ""
+                onUsageAlert?("🛑 5-hour limit reached", "You've hit your 5-hour usage cap.\(resets)")
+            } else {
+                onUsageAlert?("⚠︎ \(thr)% of your 5-hour limit",
+                              "Now at \(Int(pct.rounded()))% — ease off or you'll hit the cap.")
             }
         }
-        if alertsChanged { UserDefaults.standard.set(Array(usageAlerted), forKey: "edgepanel.usageAlerted") }
+        // Forecast alert: fires once per window when the MEASURED projection lands within 45 min.
+        // usageForecastAlerted re-arms only on a true window roll (via windowRolled above), NOT when
+        // limitClock momentarily goes nil — the burn projection flaps on small rate changes.
         if let hit = limitClock {
             let mins = hit.timeIntervalSinceNow / 60
             if mins > 0, mins <= 45, pct >= 50, !usageForecastAlerted {
@@ -434,10 +418,6 @@ final class UsageStore: ObservableObject {
                               "At this pace, around \(t). Ease off or pause autonomous tasks.")
             }
         }
-        // usageForecastAlerted re-arms only on a true window roll (cleared with the threshold set
-        // above), NOT when limitClock momentarily goes nil: the burn projection flaps in and out of
-        // "will hit before reset" on small rate changes, and clearing on each nil re-fired the
-        // forecast repeatedly for one continuous approach.
     }
 
     private func applyPlanFailure() {
@@ -465,25 +445,6 @@ final class UsageStore: ObservableObject {
     }
 
     private func computeBurn(_ p: PlanUsage, _ now: Date) -> BurnInfo? {
-        let recent = history.filter { now.timeIntervalSince($0.t) <= 1800 }
-        if let first = recent.first, let last = recent.last, recent.count >= 3 {
-            let dt = last.t.timeIntervalSince(first.t)
-            if dt >= 300 {
-                let rate = (last.util - first.util) / dt * 3600
-                guard rate > 0.5 else {
-                    return BurnInfo(ratePerHour: max(rate, 0), timeToLimit: nil, willHitBeforeReset: false)
-                }
-                let secsToLimit = max(100 - p.fiveHourPct, 0) / (rate / 3600)
-                let toReset = p.fiveHourReset.map { $0.timeIntervalSince(now) } ?? .infinity
-                return BurnInfo(ratePerHour: rate, timeToLimit: secsToLimit, willHitBeforeReset: secsToLimit < toReset)
-            }
-        }
-        if let reset = p.fiveHourReset {
-            let hrs = now.timeIntervalSince(reset.addingTimeInterval(-18000)) / 3600
-            if hrs > 0.05 {
-                return BurnInfo(ratePerHour: max(p.fiveHourPct / hrs, 0), timeToLimit: nil, willHitBeforeReset: false, isAverage: true)
-            }
-        }
-        return nil
+        UsageMath.computeBurn(history: history, pct: p.fiveHourPct, reset: p.fiveHourReset, now: now)
     }
 }

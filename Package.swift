@@ -28,5 +28,11 @@ let package = Package(
             dependencies: ["PerchCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // Mirrors Perch's UsageMath tests (burn projection + 80/90/100 alert dedup).
+        .testTarget(
+            name: "EdgePanelTests",
+            dependencies: ["EdgePanel"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
