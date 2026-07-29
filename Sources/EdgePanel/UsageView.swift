@@ -730,6 +730,13 @@ struct EdgeUsageView: View {
                 guard !expired else { return nil }
                 guard let burn else { return ("measuring your pace…", t.subtext) }
                 let rate = "+\(Int(burn.ratePerHour.rounded()))%/hr"
+                if burn.isAverage {
+                    // Whole-window AVERAGE (no recent trend sampled yet, e.g. just after launch).
+                    // State it as a fact — projecting it ("lasts the full window" / an ETA) is what
+                    // produced the "+95%/hr · lasts the full window" contradiction.
+                    return burn.ratePerHour >= 0.5 ? ("\(rate) avg so far", t.subtext)
+                                                   : ("measuring your pace…", t.subtext)
+                }
                 if let tt = burn.timeToLimit, burn.willHitBeforeReset {
                     let clock = store.limitClock.map { "limit ~\(fmtClock($0))" } ?? "≈ \(fmtDur(tt)) left"
                     return ("\(clock) · \(rate)", t.red)

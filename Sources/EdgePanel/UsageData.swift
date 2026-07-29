@@ -223,7 +223,14 @@ enum UsageLoader {
             s.limitWeek = lim.week; s.limitMonth = lim.month
             return
         }
-        func seed(_ peak: Int, _ floor: Int) -> Int { max(Int(Double(peak) * 1.25), floor) }
+        // A saturated (Int.max) peak from a hostile/corrupted transcript, scaled by 1.25, is a
+        // finite Double that exceeds Int64.max — Int(scaled) traps. Fall back to the raw peak
+        // (still ≥ floor) instead of crashing on every launch (this seed only runs once, when
+        // limits.json is missing, and a crash here means it never gets written).
+        func seed(_ peak: Int, _ floor: Int) -> Int {
+            let scaled = Double(peak) * 1.25
+            return scaled.isFinite && scaled < Double(Int.max) ? max(Int(scaled), floor) : max(peak, floor)
+        }
         let lim = Limits(window: seed(s.peakWindowTokens, 250_000),
                          day: seed(s.peakDayTokens, 1_000_000),
                          week: seed(s.peakWeekTokens, 5_000_000),
@@ -305,10 +312,13 @@ enum UsageLoader {
             let day = cal.startOfDay(for: r.date)
             dayBuckets[day, default: Bucket()].add(r)
             modelBuckets[prettyModel(r.model), default: Bucket()].add(r)
-            weekTok[weekKey(r.date), default: 0] += r.tokens
-            monthTok[monthKey(r.date), default: 0] += r.tokens
-            weekBill[weekKey(r.date), default: 0] += r.billable
-            monthBill[monthKey(r.date), default: 0] += r.billable
+            // satAdd, not +=: r.tokens/r.billable can already be Int.max (a single hostile/corrupted
+            // transcript record saturates), and plain += traps on overflow across two such records.
+            let wk = weekKey(r.date), mk = monthKey(r.date)
+            weekTok[wk] = satAdd(weekTok[wk] ?? 0, r.tokens)
+            monthTok[mk] = satAdd(monthTok[mk] ?? 0, r.tokens)
+            weekBill[wk] = satAdd(weekBill[wk] ?? 0, r.billable)
+            monthBill[mk] = satAdd(monthBill[mk] ?? 0, r.billable)
             if r.date >= sixHoursAgo { s.recentEvents.append((r.date, r.cost)) }
         }
         s.weekTokens = weekTok[weekKey(now)] ?? 0
@@ -335,7 +345,9 @@ enum UsageLoader {
         var blocks: [(start: Date, end: Date, cost: Double, tok: Int, bill: Int, last: Date)] = []
         for r in sorted {
             if var b = blocks.last, r.date < b.end, r.date.timeIntervalSince(b.last) < 18000 {
-                b.cost += r.cost; b.tok += r.tokens; b.bill += r.billable; b.last = r.date
+                // b.cost stays plain += (Double saturates to infinity, doesn't trap); tok/bill
+                // use satAdd since r.tokens/r.billable can already be Int.max.
+                b.cost += r.cost; b.tok = satAdd(b.tok, r.tokens); b.bill = satAdd(b.bill, r.billable); b.last = r.date
                 blocks[blocks.count - 1] = b
             } else {
                 let start = r.date
@@ -379,10 +391,13 @@ enum UsageLoader {
                   (obj["type"] as? String) == "assistant",
                   let msg = obj["message"] as? [String: Any],
                   let usage = msg["usage"] as? [String: Any] else { continue }
-            let inT = usage["input_tokens"] as? Int ?? 0
-            let cacheR = usage["cache_read_input_tokens"] as? Int ?? 0
-            let cacheW = usage["cache_creation_input_tokens"] as? Int ?? 0
-            let total = inT + cacheR + cacheW
+            // max(0, ...) clamp + satAdd, mirroring parseFile/aggregate: a corrupted/adversarial
+            // transcript record can carry a garbage-huge input_tokens, and plain + traps on
+            // overflow instead of saturating.
+            let inT = max(0, usage["input_tokens"] as? Int ?? 0)
+            let cacheR = max(0, usage["cache_read_input_tokens"] as? Int ?? 0)
+            let cacheW = max(0, usage["cache_creation_input_tokens"] as? Int ?? 0)
+            let total = satAdd(satAdd(inT, cacheR), cacheW)
             if total > 0 { lastInput = total; model = msg["model"] as? String ?? model }
         }
         guard lastInput > 0 else { return nil }
@@ -1259,12 +1274,38 @@ struct PlanUsage: Codable {
     var extraEnabled = false
     var extraUsed: Double = 0
     var extraLimit: Double = 0
+
+    init(fiveHourPct: Double = 0, fiveHourReset: Date? = nil, weekPct: Double = 0, weekReset: Date? = nil,
+         extraEnabled: Bool = false, extraUsed: Double = 0, extraLimit: Double = 0) {
+        self.fiveHourPct = fiveHourPct; self.fiveHourReset = fiveHourReset
+        self.weekPct = weekPct; self.weekReset = weekReset
+        self.extraEnabled = extraEnabled; self.extraUsed = extraUsed; self.extraLimit = extraLimit
+    }
+
+    // Lenient decode: the synthesized Codable throws on ANY missing/renamed key, so a schema
+    // change silently drops the ENTIRE cached plan.json on load (see UsageStore.loadStoredPlan) —
+    // the same anti-pattern already fixed for EdgeSnapshot on the iOS side. Default that ONE
+    // field instead of failing the whole decode.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fiveHourPct = (try? c.decode(Double.self, forKey: .fiveHourPct)) ?? 0
+        fiveHourReset = try? c.decode(Date.self, forKey: .fiveHourReset)
+        weekPct = (try? c.decode(Double.self, forKey: .weekPct)) ?? 0
+        weekReset = try? c.decode(Date.self, forKey: .weekReset)
+        extraEnabled = (try? c.decode(Bool.self, forKey: .extraEnabled)) ?? false
+        extraUsed = (try? c.decode(Double.self, forKey: .extraUsed)) ?? 0
+        extraLimit = (try? c.decode(Double.self, forKey: .extraLimit)) ?? 0
+    }
 }
 
 struct BurnInfo {
     var ratePerHour: Double          // % of the 5-hour window per hour
     var timeToLimit: TimeInterval?   // seconds to 100% at current pace, nil if flat
     var willHitBeforeReset: Bool
+    // true when ratePerHour is the whole-window AVERAGE (no recent trend sampled yet, e.g. just
+    // after launch) rather than a measured recent rate. An average must NOT be projected forward
+    // ("lasts the full window" / an ETA) — it's stated as a fact ("avg so far") instead.
+    var isAverage: Bool = false
 }
 
 func readClaudeOAuthToken() -> String? {

@@ -481,7 +481,7 @@ final class UsageStore: ObservableObject {
         if let reset = p.fiveHourReset {
             let hrs = now.timeIntervalSince(reset.addingTimeInterval(-18000)) / 3600
             if hrs > 0.05 {
-                return BurnInfo(ratePerHour: max(p.fiveHourPct / hrs, 0), timeToLimit: nil, willHitBeforeReset: false)
+                return BurnInfo(ratePerHour: max(p.fiveHourPct / hrs, 0), timeToLimit: nil, willHitBeforeReset: false, isAverage: true)
             }
         }
         return nil
