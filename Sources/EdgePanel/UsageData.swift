@@ -638,9 +638,17 @@ extension UsageLoader {
             // This chat's OWN mode + effort, so multiple open chats can each show their setting.
             // mode = the latest permissionMode in this transcript; effort = this project's effort.
             var rawMode: String?
-            for o in objs { if let m = o["permissionMode"] as? String, !m.isEmpty { rawMode = m } }   // keep the latest
+            var rawEffort: String?
+            for o in objs {
+                if let m = o["permissionMode"] as? String, !m.isEmpty { rawMode = m }   // latest mode this turn
+                if let e = o["effort"] as? String, !e.isEmpty { rawEffort = e }          // latest effort this turn
+            }
             let modeKey = Self.normMode(rawMode)
-            let effortKey = Self.normEffort(Self.currentEffort(cwd: resumeCwd))
+            // Effort rides THIS session's own assistant records (per-chat), so two chats can show
+            // different efforts. Fall back to the project/global setting only when the transcript
+            // hasn't recorded one yet — previously it ALWAYS used the global setting, so changing
+            // effort in one chat appeared to change it for every chat.
+            let effortKey = Self.normEffort(rawEffort ?? Self.currentEffort(cwd: resumeCwd))
             out.append(LiveSession(id: u.deletingPathExtension().lastPathComponent, project: project,
                                    cwd: resumeCwd, model: model, promptAt: promptAt, promptText: promptText,
                                    turnTokens: turnTokens, lastWrite: mod, turnComplete: turnComplete,
