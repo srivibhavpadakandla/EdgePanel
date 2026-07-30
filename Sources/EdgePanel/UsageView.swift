@@ -219,6 +219,7 @@ struct SessionsCard: View {
     let sessions: [LiveSession]
     let summaries: [String: String]   // sessionID → short prompt summary
     let theme: Theme
+    var chrome: Bool = true            // false → render without its own card container (merged into ModeCard)
 
     private func promptLine(_ s: LiveSession) -> String {
         guard let pt = s.promptText, !pt.isEmpty else { return "working…" }
@@ -286,9 +287,26 @@ struct SessionsCard: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
+            .modifier(CardChrome(theme: theme, on: chrome, padding: 14))
+        }
+    }
+}
+
+/// Applies the standard EdgePanel card container (padding + fill + border). `on: false` renders the
+/// content bare, so several sections can share ONE container (e.g. MODE/Effort + WORKING NOW merged).
+private struct CardChrome: ViewModifier {
+    let theme: Theme
+    var on: Bool = true
+    var padding: CGFloat = 14
+    var radius: CGFloat = 14
+    func body(content: Content) -> some View {
+        if on {
+            content
+                .padding(padding)
+                .background(RoundedRectangle(cornerRadius: radius).fill(theme.card))
+                .overlay(RoundedRectangle(cornerRadius: radius).stroke(theme.border, lineWidth: 1))
+        } else {
+            content
         }
     }
 }
@@ -397,6 +415,7 @@ struct ModeCard: View {
     @ObservedObject var state: EdgePanelState
     let theme: Theme
     var working: [LiveSession] = []   // working chats — show/group each one's mode + effort
+    var chrome: Bool = true           // false → render without its own card container (merged with WORKING NOW)
 
     private struct Mode { let key, label, icon: String }
     private let modes: [Mode] = [
@@ -469,9 +488,7 @@ struct ModeCard: View {
                 effortMeter(level: soloEffort, tint: tint(forMode: soloMode))
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14).fill(theme.card))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.border, lineWidth: 1))
+        .modifier(CardChrome(theme: theme, on: chrome, padding: 12))
         .animation(.smooth(duration: 0.35), value: multi)
     }
 
@@ -683,15 +700,20 @@ struct EdgeUsageView: View {
                                onDeny: { state.resolveCurrent(.deny) },
                                onAlways: { state.allowAlwaysCurrent() })
             }
-            ModeCard(state: state, theme: t, working: store.workingDebounced)
+            // MODE/Effort + WORKING NOW share ONE card, so an active chat is shown together with
+            // the mode + effort it's running under (rather than in two separate, disconnected cards).
+            VStack(spacing: 12) {
+                ModeCard(state: state, theme: t, working: store.workingDebounced, chrome: false)
+                Rectangle().fill(t.border).frame(height: 1)
+                SessionsCard(sessions: store.sessions, summaries: store.promptSummaries, theme: t, chrome: false)
+            }
+            .modifier(CardChrome(theme: t, padding: 14))
 
             if let plan = store.plan {
                 planCard(t, "Current", plan.fiveHourPct, plan.fiveHourReset, burn: store.burn)
             } else if let b = s.block {
                 windowCard(t, b, s)
             }
-
-            SessionsCard(sessions: store.sessions, summaries: store.promptSummaries, theme: t)
 
             MonthCalendar(dayTokens: s.monthDayTokens, theme: t)
 
