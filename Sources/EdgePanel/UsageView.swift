@@ -219,7 +219,9 @@ struct SessionsCard: View {
     let sessions: [LiveSession]
     let summaries: [String: String]   // sessionID → short prompt summary
     let theme: Theme
-    var chrome: Bool = true            // false → render without its own card container (merged into ModeCard)
+    var chrome: Bool = true            // false → render without its own card container
+    var currentMode: String = "ask"    // shown as a compact badge when idle (no chats running)
+    var currentEffort: String = ""
 
     private func promptLine(_ s: LiveSession) -> String {
         guard let pt = s.promptText, !pt.isEmpty else { return "working…" }
@@ -230,7 +232,9 @@ struct SessionsCard: View {
     var body: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { ctx in
             let now = ctx.date
-            let working = sessions.filter { $0.isWorking(asOf: now) }
+            // Sort by the STABLE session id (constant for a session's life), NOT by the source
+            // array's order — that reorders every ~2s refresh, making the rows jump around.
+            let working = sessions.filter { $0.isWorking(asOf: now) }.sorted { $0.id < $1.id }
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("WORKING NOW").font(.claude(10, .semibold)).tracking(0.7).foregroundColor(theme.subtext)
@@ -242,8 +246,12 @@ struct SessionsCard: View {
                     }
                 }
                 if working.isEmpty {
-                    Text("nothing running — waiting on your next prompt")
-                        .font(.claude(11)).foregroundColor(theme.subtext)
+                    HStack(spacing: 8) {
+                        Text("nothing running — waiting on your next prompt")
+                            .font(.claude(11)).foregroundColor(theme.subtext)
+                        Spacer(minLength: 6)
+                        ModeEffortBadge(mode: currentMode, effort: currentEffort, theme: theme)
+                    }
                 } else {
                     ForEach(working.prefix(4)) { s in
                         VStack(alignment: .leading, spacing: 6) {
@@ -255,6 +263,9 @@ struct SessionsCard: View {
                                 Text(s.promptAt == nil ? "—" : fmtElapsed(s.elapsed(asOf: now)))
                                     .font(.claude(13, .semibold)).foregroundColor(theme.green).monospacedDigit()
                             }
+                            // This chat's own mode + effort — small, per-chat (chats can run in
+                            // different modes at once).
+                            ModeEffortBadge(mode: s.modeKey, effort: s.effortKey, theme: theme)
                             // The prompt you gave this chat (summarized if long) — labeled
                             // + quoted so it's clearly your prompt, not the stats.
                             (Text("PROMPT  ").font(.claude(9, .semibold)).tracking(0.5).foregroundColor(theme.subtext)
@@ -307,6 +318,57 @@ private struct CardChrome: ViewModifier {
                 .overlay(RoundedRectangle(cornerRadius: radius).stroke(theme.border, lineWidth: 1))
         } else {
             content
+        }
+    }
+}
+
+/// Compact per-chat mode + effort readout: a tinted mode chip + 5 mini effort pips, small enough to
+/// sit inline on each WORKING NOW row so every chat shows the mode + effort it's running under.
+struct ModeEffortBadge: View {
+    let mode: String
+    let effort: String
+    let theme: Theme
+    private static let efforts = ["low", "medium", "high", "xhigh", "max"]
+
+    private var tint: Color {
+        switch mode {
+        case "bypass": return theme.red
+        case "edit":   return theme.amber
+        case "auto":   return theme.accent
+        default:       return theme.accent2   // plan / ask
+        }
+    }
+    private var icon: String {
+        switch mode {
+        case "edit":   return "chevron.left.forwardslash.chevron.right"
+        case "plan":   return "list.bullet.rectangle"
+        case "auto":   return "bolt.fill"
+        case "bypass": return "infinity"
+        default:       return "hand.raised"
+        }
+    }
+    private var label: String {
+        switch mode {
+        case "edit": return "Edit"; case "plan": return "Plan"; case "auto": return "Auto"
+        case "bypass": return "Bypass"; default: return "Ask"
+        }
+    }
+
+    var body: some View {
+        let idx = Self.efforts.firstIndex(of: effort)
+        HStack(spacing: 5) {
+            HStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 8, weight: .bold))
+                Text(label).font(.claude(8, .semibold))
+            }
+            .foregroundColor(theme.bg)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(tint))
+            HStack(spacing: 2) {
+                ForEach(0..<Self.efforts.count, id: \.self) { i in
+                    Capsule().fill(idx != nil && i <= idx! ? tint : theme.track).frame(width: 5, height: 3)
+                }
+            }
         }
     }
 }
@@ -700,14 +762,10 @@ struct EdgeUsageView: View {
                                onDeny: { state.resolveCurrent(.deny) },
                                onAlways: { state.allowAlwaysCurrent() })
             }
-            // MODE/Effort + WORKING NOW share ONE card, so an active chat is shown together with
-            // the mode + effort it's running under (rather than in two separate, disconnected cards).
-            VStack(spacing: 12) {
-                ModeCard(state: state, theme: t, working: store.workingDebounced, chrome: false)
-                Rectangle().fill(t.border).frame(height: 1)
-                SessionsCard(sessions: store.sessions, summaries: store.promptSummaries, theme: t, chrome: false)
-            }
-            .modifier(CardChrome(theme: t, padding: 14))
+            // WORKING NOW, with each chat showing its own compact mode + effort badge (chats can
+            // run in different modes simultaneously), plus the current mode as a badge when idle.
+            SessionsCard(sessions: store.sessions, summaries: store.promptSummaries, theme: t,
+                         currentMode: state.normalizedMode, currentEffort: state.normalizedEffort)
 
             if let plan = store.plan {
                 planCard(t, "Current", plan.fiveHourPct, plan.fiveHourReset, burn: store.burn)
