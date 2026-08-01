@@ -268,17 +268,32 @@ struct SessionsCard: View {
                             ModeEffortBadge(mode: s.modeKey, effort: s.effortKey, theme: theme)
                             // The prompt you gave this chat (summarized if long) — labeled
                             // + quoted so it's clearly your prompt, not the stats.
-                            (Text("PROMPT  ").font(.claude(9, .semibold)).tracking(0.5).foregroundColor(theme.subtext)
-                                + Text("\u{201C}\(promptLine(s))\u{201D}").font(.claude(12)).italic().foregroundColor(theme.text.opacity(0.88)))
-                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                            HStack(spacing: 5) {
-                                if s.turnTokens == 0 {
-                                    Text("starting…").font(.claude(11)).foregroundColor(theme.subtext)
-                                    Text("· \(s.model.map(prettyModel) ?? "Claude")").font(.claude(10)).foregroundColor(theme.subtext)
-                                } else {
-                                    Text(fmtTokens(s.turnTokens)).font(.claude(13, .semibold)).foregroundColor(theme.text)
-                                    Text("tokens this turn · \(s.model.map(prettyModel) ?? "Claude")")
-                                        .font(.claude(10)).foregroundColor(theme.subtext)
+                            if let pt = s.promptText, !pt.isEmpty {
+                                // The prompt you gave this chat (summarized if long) — labeled
+                                // + quoted so it's clearly your prompt, not the stats.
+                                (Text("PROMPT  ").font(.claude(9, .semibold)).tracking(0.5).foregroundColor(theme.subtext)
+                                    + Text("\u{201C}\(promptLine(s))\u{201D}").font(.claude(12)).italic().foregroundColor(theme.text.opacity(0.88)))
+                                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 5) {
+                                    if s.turnTokens == 0 {
+                                        Text("starting…").font(.claude(11)).foregroundColor(theme.subtext)
+                                        Text("· \(s.model.map(prettyModel) ?? "Claude")").font(.claude(10)).foregroundColor(theme.subtext)
+                                    } else {
+                                        Text(fmtTokens(s.turnTokens)).font(.claude(13, .semibold)).foregroundColor(theme.text)
+                                        Text("tokens this turn · \(s.model.map(prettyModel) ?? "Claude")")
+                                            .font(.claude(10)).foregroundColor(theme.subtext)
+                                    }
+                                }
+                            } else {
+                                // No prompt captured yet — don't show a bare "working…" placeholder as
+                                // if it were your prompt; just say an agent is working.
+                                HStack(spacing: 5) {
+                                    Text("an agent is working…").font(.claude(12)).italic().foregroundColor(theme.subtext)
+                                    if s.turnTokens > 0 {
+                                        Text("· \(fmtTokens(s.turnTokens)) tokens").font(.claude(10)).foregroundColor(theme.subtext)
+                                    } else {
+                                        Text("· \(s.model.map(prettyModel) ?? "Claude")").font(.claude(10)).foregroundColor(theme.subtext)
+                                    }
                                 }
                             }
                             // Live proof-of-work: subagents in flight + prompts waiting in line.

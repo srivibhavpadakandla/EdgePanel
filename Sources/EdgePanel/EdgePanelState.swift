@@ -851,6 +851,15 @@ final class EdgePanelState: ObservableObject {
     /// Alert the phone that a permission is waiting — so you can Allow/Deny even with
     /// the app fully closed. Two independent paths: APNs (Tier 2, paid) and ntfy
     /// (free, with Allow/Deny action buttons). No-op if neither is configured.
+    /// Re-fire the notification for every currently-pending permission — a manual "resend" for when
+    /// the first push was missed on the phone. Returns how many were re-sent (0 = nothing pending).
+    func resendPendingPermission() -> Int {
+        let reqs = Array(pendingById.values)
+        let all = reqs.isEmpty ? (pending.map { [$0] } ?? []) : reqs
+        for r in all { pushPermissionAlert(r) }
+        return all.count
+    }
+
     private func pushPermissionAlert(_ p: PendingPermission) {
         let body = Self.redactSecrets(p.summary.isEmpty ? p.reason : p.summary)   // don't ship a secret through APNs/ntfy
         Notifier.permission(deviceToken: devicePushToken, id: p.id, tool: p.toolName, summary: body, risk: p.risk.rawValue)

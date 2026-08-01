@@ -189,6 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: data)
             case ("GET", "/health"):
                 return .ok("edgepanel ok")
+            case ("GET", "/permission/resend"):
+                // Manual resend of the currently-pending permission's notification (loopback-only,
+                // so no token needed — it only re-pushes an EXISTING pending alert, never resolves).
+                let n = await MainActor.run { state.resendPendingPermission() }
+                return .ok("resent \(n)")
             case ("GET", "/debug/inject-probe"):
                 // Test-only (EDGEPANEL_DEBUG=1): focus the editor chat input + report what
                 // Accessibility sees — validates the focus path WITHOUT typing into the chat.
