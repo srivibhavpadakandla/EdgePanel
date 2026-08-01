@@ -1003,7 +1003,7 @@ struct PairSheet: View {
                     Text("On your Mac: EdgePanel menu-bar icon → Pair iPhone…")
                 }
                 Section("Mac address") {
-                    TextField("192.168.1.20:8788", text: $host)
+                    TextField("http://100.x.y.z:8788", text: $host)
                         .autocorrectionDisabled().textInputAutocapitalization(.never)
                 }
                 Section("Pairing token") {
@@ -1011,7 +1011,7 @@ struct PairSheet: View {
                         .autocorrectionDisabled().textInputAutocapitalization(.never)
                 }
                 Section {
-                    Text("On your Mac, EdgePanel logs its address + token at launch. Both apps must be on the same network.")
+                    Text("Keep Tailscale connected on both devices. Scan Pair iPhone on your Mac; HTTPS Serve URLs also work.")
                         .font(.footnote).foregroundColor(.secondary)
                 }
             }

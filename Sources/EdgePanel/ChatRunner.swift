@@ -5,6 +5,7 @@
 // so a multi-minute turn doesn't block the HTTP request.
 
 import Foundation
+import Darwin
 
 final class ChatRunner: @unchecked Sendable {
     static let shared = ChatRunner()
@@ -30,12 +31,30 @@ final class ChatRunner: @unchecked Sendable {
     private var counter = 0
     private let maxRuntime: TimeInterval = 600   // 10 min hard cap per turn
 
+    /// Lock-backed reference state avoids capturing/mutating local vars across Sendable closures;
+    /// Swift 6 correctly rejects that pattern even when an adjacent lock makes it safe at runtime.
+    private final class OutputReadState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var closed = false
+        private var readDone = false
+
+        func closeOnce(_ fd: Int32) {
+            lock.lock(); let shouldClose = !closed; closed = true; lock.unlock()
+            if shouldClose, fd >= 0 { close(fd) }
+        }
+        func markReadDone() { lock.lock(); readDone = true; lock.unlock() }
+        func isReadDone() -> Bool { lock.lock(); defer { lock.unlock() }; return readDone }
+    }
+
     private static let claudePaths = [
         NSHomeDirectory() + "/.local/bin/claude",
         "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
         NSHomeDirectory() + "/.claude/local/claude"]
     private static var resolvedClaude: String? {
         claudePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+    private static var launcherPath: String {
+        Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
     }
     var available: Bool { Self.resolvedClaude != nil }
 
@@ -54,13 +73,13 @@ final class ChatRunner: @unchecked Sendable {
 
         DispatchQueue.global(qos: .userInitiated).async { [maxRuntime] in
             let p = Process()
-            p.executableURL = URL(fileURLWithPath: claude)
+            p.executableURL = URL(fileURLWithPath: Self.launcherPath)
             // stream-json + partial messages → token-by-token output we relay live to
             // the phone (job.result grows while status stays "running").
             var args = ["-p", message, "--output-format", "stream-json", "--verbose",
                         "--include-partial-messages", "--permission-mode", "bypassPermissions"]
             if let sid = sessionId, !sid.isEmpty { args += ["--resume", sid] }
-            p.arguments = args
+            p.arguments = ["--edgepanel-process-group-wrapper", claude] + args
             let dir = cwd.isEmpty ? NSHomeDirectory() : (cwd as NSString).expandingTildeInPath
             p.currentDirectoryURL = URL(fileURLWithPath: dir)
             // Give the agent's tools a real PATH (GUI apps launch with a minimal one).
@@ -78,7 +97,7 @@ final class ChatRunner: @unchecked Sendable {
             self.lock.lock(); self.procs[jid] = p
             let cancelNow = self.cancelIntent.remove(jid) != nil
             self.lock.unlock()
-            if cancelNow { p.terminate() }
+            if cancelNow { self.terminateTree(p) }
             // Hard cap the turn; terminating EOFs the pipe so the read loop below exits. Also
             // close the stdout READ FD so a leaked tool child that inherited the write end (and
             // exited claude already, so p.isRunning is false) can't pin the read loop forever.
@@ -89,12 +108,9 @@ final class ChatRunner: @unchecked Sendable {
             // close-once guard keeps the watchdog and the normal post-loop cleanup from both
             // closing the dup.
             let outFD = dup(out.fileHandleForReading.fileDescriptor)
-            let closeLock = NSLock(); var outClosed = false; var readDone = false
-            func closeOutOnce() {
-                closeLock.lock(); let already = outClosed; outClosed = true; closeLock.unlock()
-                if !already, outFD >= 0 { close(outFD) }
-            }
-            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() }; closeOutOnce() }
+            let outputState = OutputReadState()
+            func closeOutOnce() { outputState.closeOnce(outFD) }
+            let watchdog = DispatchWorkItem { if p.isRunning { self.terminateTree(p) }; closeOutOnce() }
             DispatchQueue.global().asyncAfter(deadline: .now() + maxRuntime, execute: watchdog)
             // Escape hatch (mirrors the stderr one): once claude EXITS, a grandchild that inherited
             // stdout (`npm run dev &`, a spawned server) can keep the pipe open and pin the read loop
@@ -105,8 +121,7 @@ final class ChatRunner: @unchecked Sendable {
             DispatchQueue.global(qos: .utility).async {
                 p.waitUntilExit()
                 usleep(1_500_000)   // let any final buffered stdout drain first
-                closeLock.lock(); let stuck = !readDone; closeLock.unlock()
-                if stuck { closeOutOnce() }
+                if !outputState.isReadDone() { closeOutOnce() }
             }
             // Drain stderr concurrently (surfaces a real failure reason on the phone). Read via a
             // dup'd POSIX fd so we can CLOSE it to unblock a stuck reader (an orphaned tool child
@@ -171,7 +186,7 @@ final class ChatRunner: @unchecked Sendable {
                 }
             }
             if !buffer.isEmpty { handleLine(buffer) }
-            closeLock.lock(); readDone = true; closeLock.unlock()   // loop finished on its own → side thread must NOT close (fd-reuse race)
+            outputState.markReadDone()   // loop finished on its own → side thread must NOT close (fd-reuse race)
             p.waitUntilExit()
             watchdog.cancel()
             closeOutOnce()   // reclaim our dup'd stdout fd in the normal path (watchdog may not have fired)
@@ -280,7 +295,7 @@ final class ChatRunner: @unchecked Sendable {
         if running && p == nil { cancelIntent.insert(jid) }
         lock.unlock()
         guard let p, running else { return running }   // report success when intent was queued
-        p.terminate()
+        terminateTree(p)
         return true
     }
 
@@ -289,10 +304,23 @@ final class ChatRunner: @unchecked Sendable {
     func cancelAll() -> Int {
         lock.lock()
         let running = procs.values.filter { $0.isRunning }
+        let runningCount = jobs.values.filter { $0.status == "running" }.count
         for (jid, job) in jobs where job.status == "running" && procs[jid] == nil { cancelIntent.insert(jid) }
         lock.unlock()
-        running.forEach { $0.terminate() }
-        return running.count
+        running.forEach { terminateTree($0) }
+        return runningCount
+    }
+
+    /// Signal the process group created by main.swift's wrapper, then escalate after a grace
+    /// period. Fall back to Process.terminate if the group is unexpectedly unavailable.
+    private func terminateTree(_ process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 0 else { process.terminate(); return }
+        if kill(-pid, SIGTERM) != 0 { process.terminate() }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
+            // signal 0 checks whether any member of the group remains.
+            if kill(-pid, 0) == 0 { _ = kill(-pid, SIGKILL) }
+        }
     }
 
     private func finish(_ jid: String, _ job: Job) {

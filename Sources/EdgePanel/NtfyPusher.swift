@@ -5,9 +5,9 @@
 //
 // GATED behind ~/.edgepanel/ntfy.json — absent ⇒ disabled:
 //   { "server": "https://ntfy.sh", "topic": "edgepanel-7f3k9q",
-//     "macHost": "100.98.159.7:8788" }
+//     "macHost": "https://your-mac.your-tailnet.ts.net" }
 // server defaults to https://ntfy.sh. macHost lets the action buttons reach this Mac
-// (use the Tailscale IP so it works off your LAN) — each button carries only a
+// (use the HTTPS Tailscale Serve URL) — each button carries only a
 // scoped, single-permission action token (EdgePanelAuth.actionToken), never the raw
 // pairing token, since ntfy.sh is a public third-party relay. The topic name is the
 // only access control on the public server — keep it unguessable or self-host.
@@ -66,7 +66,12 @@ final class NtfyPusher: @unchecked Sendable {
             "tags": [risk == "danger" ? "rotating_light" : "lock"],
             "priority": 5]
         if let host = config?.macHost, !host.isEmpty {
-            let url = "http://\(host)/permission/decide"
+            let base = host.hasSuffix("/") ? String(host.dropLast()) : host
+            guard base.lowercased().hasPrefix("https://") else {
+                NSLog("ntfy permission actions disabled: macHost must be an HTTPS URL")
+                publish(payload); return
+            }
+            let url = "\(base)/permission/decide"
             // A scoped per-action token (see EdgePanelAuth), NOT the raw pairing token — ntfy.sh
             // is a public third-party relay by default, and the raw token would grant whoever
             // reads that topic full LAN control instead of just this one permission decision.

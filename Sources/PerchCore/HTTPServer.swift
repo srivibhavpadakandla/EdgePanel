@@ -1,7 +1,8 @@
 import Foundation
 import Network
 
-/// A minimal embedded HTTP/1.1 server bound to **127.0.0.1 only**.
+/// A minimal embedded HTTP/1.1 server. It is loopback-only by default and can
+/// optionally admit peers from Tailscale's dedicated address ranges.
 ///
 /// Built on `Network.framework`'s `NWListener` with `requiredInterfaceType =
 /// .loopback`, so it is unreachable from any non-loopback interface. The
@@ -13,6 +14,7 @@ public final class HTTPServer: @unchecked Sendable {
     private let port: NWEndpoint.Port
     private let handler: Handler
     private let loopbackOnly: Bool
+    private let allowTailnet: Bool
     private let queue = DispatchQueue(label: "perch.http.server")
     private var listener: NWListener?
 
@@ -23,18 +25,22 @@ public final class HTTPServer: @unchecked Sendable {
     /// Fires on the server's internal queue.
     public var onState: (@Sendable (Bool) -> Void)?
 
-    /// `loopbackOnly` (default) binds 127.0.0.1 only — for hooks. Pass `false`
-    /// to also accept LAN connections (e.g. an iPhone companion); callers MUST
-    /// then authenticate requests themselves (a token).
-    public init(port: UInt16, loopbackOnly: Bool = true, handler: @escaping Handler) {
+    /// `loopbackOnly` (default) binds 127.0.0.1 only. `allowTailnet` opens the
+    /// listener but drops every non-loopback peer outside Tailscale's CGNAT/ULA
+    /// ranges before parsing HTTP. Callers must still authenticate requests.
+    public init(port: UInt16, loopbackOnly: Bool = true, allowTailnet: Bool = false,
+                handler: @escaping Handler) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8787
         self.loopbackOnly = loopbackOnly
+        self.allowTailnet = allowTailnet
         self.handler = handler
     }
 
     public func start() throws {
         let params = NWParameters.tcp
-        if loopbackOnly { params.requiredInterfaceType = .loopback }   // refuse non-loopback interfaces
+        // Network.framework cannot bind specifically to utun/Tailscale here. Open the listener
+        // only when tailnet access was requested, then enforce the peer range in accept().
+        if loopbackOnly && !allowTailnet { params.requiredInterfaceType = .loopback }
         params.allowLocalEndpointReuse = true
         if let tcp = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
             tcp.version = .v4
@@ -70,9 +76,10 @@ public final class HTTPServer: @unchecked Sendable {
 
     private func accept(_ conn: NWConnection) {
         let loopback = Self.isLoopback(conn.endpoint)
-        // Defense in depth: in loopback-only mode drop any non-loopback peer even
-        // if the interface check was bypassed. In LAN mode the handler authenticates.
-        guard loopback || !loopbackOnly else {
+        let tailnet = Self.isTailnet(conn.endpoint)
+        // Drop ordinary LAN/public peers before reading request bytes. Tailnet traffic is already
+        // carried inside WireGuard, and the application bearer token remains mandatory above it.
+        guard loopback || (allowTailnet && tailnet) || !loopbackOnly else {
             conn.cancel()
             return
         }
@@ -146,5 +153,30 @@ public final class HTTPServer: @unchecked Sendable {
         default:
             return false
         }
+    }
+
+    private static func isTailnet(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case let .hostPort(host, _):
+            switch host {
+            case .ipv4(let address):
+                return isTailnetIPv4([UInt8](address.rawValue))
+            case .ipv6(let address):
+                return isTailnetIPv6([UInt8](address.rawValue))
+            default:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+
+    // Internal pure helpers keep the trust boundary directly unit-testable.
+    static func isTailnetIPv4(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 4 && bytes[0] == 100 && (64...127).contains(bytes[1])
+    }
+
+    static func isTailnetIPv6(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 16 && Array(bytes.prefix(6)) == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0]
     }
 }

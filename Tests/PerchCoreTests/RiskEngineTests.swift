@@ -128,4 +128,35 @@ struct RiskEngineToolTests {
         #expect(a.level == .danger)
         #expect(a.alwaysDangerous)
     }
+
+    @Test("dot-dot traversal cannot disguise a credential or system write")
+    func traversalWrite() {
+        let home = NSHomeDirectory()
+        let credential = RiskEngine.assess(
+            toolName: "Write",
+            filePath: "\(home)/project/../.ssh/authorized_keys",
+            cwd: "\(home)/project"
+        )
+        #expect(credential.level == .danger)
+        #expect(credential.alwaysDangerous)
+
+        let system = RiskEngine.assess(toolName: "Write", filePath: "/tmp/../etc/hosts", cwd: "/tmp")
+        #expect(system.level == .danger)
+        #expect(system.alwaysDangerous)
+    }
+
+    @Test("relative traversal is resolved against the workspace")
+    func relativeTraversalWrite() {
+        let home = NSHomeDirectory()
+        let a = RiskEngine.assess(toolName: "Write", filePath: "../.ssh/authorized_keys", cwd: "\(home)/project")
+        #expect(a.level == .danger)
+        #expect(a.alwaysDangerous)
+    }
+
+    @Test("a command field is inspected regardless of MCP tool naming")
+    func commandBearingMCPTool() {
+        let a = RiskEngine.assess(toolName: "mcp__runner__run_command", command: "rm -rf ~")
+        #expect(a.level == .danger)
+        #expect(a.alwaysDangerous)
+    }
 }

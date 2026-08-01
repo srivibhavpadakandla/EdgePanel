@@ -69,7 +69,7 @@ final class EditorInjector: @unchecked Sendable {
             guard let app = self.runningEditor() else { return nil }
             let prior = pb.string(forType: .string)
             pb.clearContents(); pb.setString(text, forType: .string)
-            app.activate(options: [.activateIgnoringOtherApps])
+            app.activate()
             return (prior, pb.changeCount)
         }
         guard let saved else { return false }
@@ -150,7 +150,7 @@ final class EditorInjector: @unchecked Sendable {
     func probeFocus() -> [String: String] {
         let found = onMain { () -> Bool in
             guard let app = self.runningEditor() else { return false }
-            app.activate(options: [.activateIgnoringOtherApps]); return true
+            app.activate(); return true
         }
         guard found else { return ["editor": "none-running"] }
         waitFrontmost(timeout: 1.8)
@@ -188,7 +188,7 @@ final class EditorInjector: @unchecked Sendable {
     }
     /// Re-activate the editor (used before a re-submit, in case another app stole focus).
     private func ensureFrontmost() {
-        _ = onMain { self.runningEditor()?.activate(options: [.activateIgnoringOtherApps]) ?? false }
+        _ = onMain { self.runningEditor()?.activate() ?? false }
         usleep(250_000)
     }
 
@@ -229,7 +229,7 @@ final class EditorInjector: @unchecked Sendable {
         defer { if gotLock { Self.injectLock.unlock() } }
         let found: Bool = onMain {
             guard let app = self.runningEditor() else { return false }
-            app.activate(options: [.activateIgnoringOtherApps]); return true
+            app.activate(); return true
         }
         guard found else { return false }
         usleep(450_000)

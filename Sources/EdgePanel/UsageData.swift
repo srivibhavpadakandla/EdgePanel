@@ -191,6 +191,34 @@ enum UsageLoader {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
     }
 
+    // Recursive enumeration is expensive for long-time users with thousands of transcripts.
+    // Cache the file index briefly; callers still stat the small candidate set for fresh mtimes.
+    private static let transcriptIndexLock = NSLock()
+    private static var transcriptIndexAt = Date.distantPast
+    private struct IndexedTranscript { let url: URL; let modified: Date }
+    private static var transcriptIndex: [IndexedTranscript] = []
+    private static func indexedTranscripts(maxAge: TimeInterval = 5) -> [IndexedTranscript] {
+        transcriptIndexLock.lock()
+        defer { transcriptIndexLock.unlock() }
+        if Date().timeIntervalSince(transcriptIndexAt) <= maxAge { return transcriptIndex }
+        let base = projectsBase()
+        var files: [IndexedTranscript] = []
+        if let en = FileManager.default.enumerator(
+            at: base, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            while files.count < 100_000, let u = en.nextObject() as? URL {
+                guard u.pathExtension == "jsonl" else { continue }
+                let modified = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    ?? .distantPast
+                files.append(IndexedTranscript(url: u, modified: modified))
+            }
+        }
+        transcriptIndex = files
+        transcriptIndexAt = Date()
+        return files
+    }
+
     static func computeSummary() -> Summary {
         let base = projectsBase()
         var recs: [Rec] = []
@@ -484,17 +512,16 @@ extension UsageLoader {
     /// first, each annotated with the in-flight turn's prompt time + token count.
     /// The view filters to the ones still generating (`isWorking`).
     static func activeSessions(within: TimeInterval = 300, limit: Int = 8) -> [LiveSession] {
-        let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         let now = Date()
         var recent: [(url: URL, date: Date)] = []
-        while let u = en.nextObject() as? URL {
-            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+        for item in indexedTranscripts() {
+            let u = item.url
+            guard !isTransientProject(u) else { continue }
             // Skip subagent/sidechain transcripts (Task tool, workflow finders, etc.) —
             // they're named agent-*.jsonl and are NOT real chats. Counting them made
             // WORKING NOW show "8 chats" and fired a "done" notification for each one.
             if u.deletingPathExtension().lastPathComponent.hasPrefix("agent-") { continue }
-            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let mod = item.modified
             if now.timeIntervalSince(mod) <= within { recent.append((u, mod)) }
         }
         recent.sort { $0.date > $1.date }
@@ -504,7 +531,9 @@ extension UsageLoader {
             // The current turn lives at the END of the transcript — read only the
             // tail so this stays cheap enough to refresh every couple of seconds
             // even when the active session's transcript is many MB.
-            guard let text = tailString(u, maxBytes: 6_000_000) else { continue }
+            // A bounded tail is enough for current-turn state. If the prompt has scrolled out,
+            // the terminal-assistant logic below intentionally determines completion from the tail.
+            guard let text = tailString(u, maxBytes: 1_500_000) else { continue }
             let objs = text.split(separator: "\n", omittingEmptySubsequences: true)
                 .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
             // Skip automated SDK invocations (entrypoint "sdk-cli") — e.g. the Tab Organizer
@@ -663,15 +692,14 @@ extension UsageLoader {
     /// you currently have open in VS Code / Cursor. Used to decide whether a phone
     /// message should be TYPED INTO the live editor session vs forked via --resume.
     static func mostRecentInteractiveSessionId() -> String? {
-        let base = projectsBase()
-        guard let en = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
         let now = Date()
         var cands: [(url: URL, id: String, date: Date)] = []
-        while let u = en.nextObject() as? URL {
-            guard u.pathExtension == "jsonl", !isTransientProject(u) else { continue }
+        for item in indexedTranscripts() {
+            let u = item.url
+            guard !isTransientProject(u) else { continue }
             let id = u.deletingPathExtension().lastPathComponent
             if id.hasPrefix("agent-") { continue }
-            let mod = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let mod = item.modified
             if now.timeIntervalSince(mod) <= 600 { cands.append((u, id, mod)) }
         }
         cands.sort { $0.date > $1.date }

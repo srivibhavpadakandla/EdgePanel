@@ -61,12 +61,11 @@ final class EdgePanelState: ObservableObject {
     var onApprovalChange: ((Bool) -> Void)?
     /// The panel's Close (✕) button → slide the panel away (even if a permission pinned it).
     var onDismissRequest: (() -> Void)?
-    /// Autonomous mode (toggled from the phone): auto-allow every permission so a
-    /// session runs hands-off. Persisted so it survives a restart.
-    @Published var autoApprove = UserDefaults.standard.bool(forKey: "edgepanel.autoApprove")
+    /// Autonomous mode is intentionally process-lifetime only. Relaunching restores the safe
+    /// default instead of silently resuming broad auto-approval hours or days later.
+    @Published var autoApprove = false
     func setAutoApprove(_ on: Bool) {
         autoApprove = on
-        UserDefaults.standard.set(on, forKey: "edgepanel.autoApprove")
         // Drain EVERY held non-dangerous request (not just the surfaced one) so flipping
         // Autonomous on is truly hands-off — otherwise sibling held requests hang until their
         // 30s timeout. The irreversible 1% (alwaysDangerous) stays held for a tap, preserving
@@ -87,7 +86,7 @@ final class EdgePanelState: ObservableObject {
         setAutoApprove(false)
         panicArmed = true
         for bid in Array(resolvers.keys) { resolve(bid, .deny) }   // deny all held permission requests
-        for qid in Array(questionResolvers.keys) { resolveQuestion(qid, [:]) }   // dismiss all held questions
+        for qid in Array(questionResolvers.keys) { resolveQuestion(qid, nil) }   // dismiss all held questions
         let killed = ChatRunner.shared.cancelAll()
         panicResetTimer?.invalidate()
         panicResetTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
@@ -99,7 +98,7 @@ final class EdgePanelState: ObservableObject {
 
     // MARK: Held AskUserQuestion gate (answer from the phone)
     @Published var pendingQuestion: PendingQuestion?
-    private var questionResolvers: [String: CheckedContinuation<[String: String], Never>] = [:]
+    private var questionResolvers: [String: CheckedContinuation<[String: String]?, Never>] = [:]
     private var pendingQuestionById: [String: PendingQuestion] = [:]   // id → request (to re-surface the next one on resolve)
     private var questionCounter = 0
 
@@ -112,6 +111,12 @@ final class EdgePanelState: ObservableObject {
         // and NaN/inf resolve to 30. Keeps the Task.sleep conversion safe for any input.
         let raw = TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_DECISION_TIMEOUT"] ?? "") ?? 30
         return raw.isFinite ? min(max(raw, 0), 3600) : 30
+    }()
+    private let questionTimeout: TimeInterval = {
+        // AskUserQuestion hooks time out after 120 seconds. Release just before that so Claude's
+        // native prompt can take over, while keeping the duration configurable for tests.
+        let raw = TimeInterval(ProcessInfo.processInfo.environment["EDGEPANEL_QUESTION_TIMEOUT"] ?? "") ?? 115
+        return raw.isFinite ? min(max(raw, 0), 115) : 115
     }()
 
     private var idleTimer: Timer?
@@ -150,7 +155,7 @@ final class EdgePanelState: ObservableObject {
         effortPreview = effortAnim(now)
         effortPreviewTimer?.invalidate()
         effortPreviewTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
-            self?.effortPreview = nil
+            Task { @MainActor in self?.effortPreview = nil }
         }
     }
 
@@ -435,9 +440,9 @@ final class EdgePanelState: ObservableObject {
 
     /// Holds the AskUserQuestion PreToolUse hook open and surfaces the questions to
     /// the phone. Returns the answer map {questionText: selectedLabel(s)} the caller
-    /// echoes back in `updatedInput`. Times out (empty) so the desktop UI can take
-    /// over if nobody answers.
-    func requestQuestionDecision(questionsData: Data, project: String?) async -> [String: String] {
+    /// echoes back in `updatedInput`. Returns nil on timeout so the desktop UI can
+    /// take over if nobody answers.
+    func requestQuestionDecision(questionsData: Data, project: String?) async -> [String: String]? {
         let raw = (try? JSONSerialization.jsonObject(with: questionsData)) as? [[String: Any]] ?? []
         let items: [PendingQuestion.Item] = raw.map { q in
             let opts = (q["options"] as? [[String: Any]] ?? []).map {
@@ -447,8 +452,8 @@ final class EdgePanelState: ObservableObject {
                                         header: q["header"] as? String ?? "",
                                         multiSelect: (q["multiSelect"] as? Bool) ?? false, options: opts)
         }
-        guard !items.isEmpty else { return [:] }
-        if panicArmed { return [:] }   // Panic window → don't hold the turn open on a question
+        guard !items.isEmpty else { return nil }
+        if panicArmed { return nil }   // Panic window → don't hold the turn open on a question
         questionCounter += 1
         let qid = "q\(questionCounter)"
         let request = PendingQuestion(id: qid, items: items, project: project)
@@ -458,17 +463,18 @@ final class EdgePanelState: ObservableObject {
             // Don't clobber an already-displayed question — hold this one in the queue and only
             // take the display slot when nothing else is currently showing. Otherwise a second
             // concurrent AskUserQuestion silently overwrites `pendingQuestion` and the first one
-            // never gets shown, just times out empty 115s later.
+            // never gets shown, just times out 115s later.
             if pendingQuestion == nil { pendingQuestion = request }
             onApprovalChange?(true)
             pushQuestionAlert(request)
             idleTimer?.invalidate(); idleTimer = nil
             // Clean up just UNDER the hook's own timeout (120s) so the gate releases and
             // the desktop UI takes over at the timeout, instead of lingering ~30s
-            // locked-open after the hook already gave up. We resolve empty (no answer).
-            Task { [weak self, qid] in
-                try? await Task.sleep(nanoseconds: 115 * 1_000_000_000)
-                self?.resolveQuestion(qid, [:])
+            // locked-open after the hook already gave up. A nil result tells the hook to defer
+            // to Claude's native question UI rather than fabricating an allowed empty answer.
+            Task { [weak self, qid, questionTimeout] in
+                try? await Task.sleep(nanoseconds: UInt64(questionTimeout * 1_000_000_000))
+                self?.resolveQuestion(qid, nil)
             }
         }
     }
@@ -477,7 +483,7 @@ final class EdgePanelState: ObservableObject {
     /// "labelA,labelB" for multi-select}.
     func resolveQuestionRemote(id: String, answers: [String: String]) { resolveQuestion(id, answers) }
 
-    private func resolveQuestion(_ qid: String, _ answers: [String: String]) {
+    private func resolveQuestion(_ qid: String, _ answers: [String: String]?) {
         guard let continuation = questionResolvers.removeValue(forKey: qid) else { return }
         continuation.resume(returning: answers)
         pendingQuestionById[qid] = nil

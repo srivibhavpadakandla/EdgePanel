@@ -1,5 +1,5 @@
 // EdgeSnapshot — a JSON-serializable mirror of everything the panel shows, for
-// the iPhone companion. Served (token-protected) over the LAN by AppDelegate.
+// the iPhone companion. Served token-protected on loopback and published through HTTPS.
 // Dates are epoch seconds so any client decodes them trivially.
 
 import Foundation

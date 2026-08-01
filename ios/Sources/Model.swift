@@ -1,5 +1,44 @@
 import Foundation
 import SwiftUI
+import Security
+
+private enum PairingKeychain {
+    private static let service = "com.srivibhav.edgepanel.mobile"
+    private static let account = "pairing-token"
+
+    static func read() -> String {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    @discardableResult
+    static func write(_ token: String) -> Bool {
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        if token.isEmpty {
+            let status = SecItemDelete(key as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let attrs: [String: Any] = [kSecValueData as String: Data(token.utf8)]
+        if SecItemUpdate(key as CFDictionary, attrs as CFDictionary) == errSecSuccess { return true }
+        var add = key
+        add[kSecValueData as String] = Data(token.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+}
 
 // Mirrors EdgeSnapshot served by the Mac (epoch-second dates).
 struct EdgeSnapshot: Codable {
@@ -180,8 +219,38 @@ final class EdgeClient: ObservableObject {
     @Published var lastUpdated: Date?   // when /snapshot last succeeded — shown when offline
     @Published var refreshing = false   // a manual refresh is in flight (spins the button)
 
-    @AppStorage("edgepanel.host") var host: String = ""   // set by pairing (QR/manual); empty → show pairing
-    @AppStorage("edgepanel.token") var token: String = ""
+    @AppStorage("edgepanel.host") var host: String = ""   // full HTTPS base URL
+    @Published var token: String {
+        didSet { PairingKeychain.write(token) }
+    }
+
+    init() {
+        let secure = PairingKeychain.read()
+        let legacy = UserDefaults.standard.string(forKey: "edgepanel.token") ?? ""
+        token = secure.isEmpty ? legacy : secure
+        if !legacy.isEmpty, (!secure.isEmpty || PairingKeychain.write(legacy)) {
+            UserDefaults.standard.removeObject(forKey: "edgepanel.token")
+        }
+    }
+
+    /// Build one API endpoint. Plain HTTP is accepted only on loopback or Tailscale's dedicated
+    /// address ranges, where the connection is already carried inside the tailnet's WireGuard
+    /// tunnel. Public/LAN HTTP remains rejected. A scheme-less host is upgraded to HTTPS.
+    private func endpoint(_ path: String) -> URL? {
+        let raw = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let normalized = raw.contains("://") ? raw : "https://\(raw)"
+        guard let base = URL(string: normalized), let scheme = base.scheme?.lowercased() else { return nil }
+        let loopback = base.host == "127.0.0.1" || base.host == "localhost" || base.host == "::1"
+        let tailnet: Bool = {
+            guard let host = base.host?.lowercased() else { return false }
+            let octets = host.split(separator: ".").compactMap { UInt8($0) }
+            if octets.count == 4, octets[0] == 100, (64...127).contains(octets[1]) { return true }
+            return host.hasPrefix("fd7a:115c:a1e0:")
+        }()
+        guard scheme == "https" || (scheme == "http" && (loopback || tailnet)) else { return nil }
+        return base.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
 
     private var timer: Timer?
     private var lastPollOK: Date?   // gap detection → reset the finished-session baseline after a blackout
@@ -211,7 +280,7 @@ final class EdgeClient: ObservableObject {
     /// immediately so the card clears without waiting for the next tick.
     func decidePermission(id: String, decision: String) {
         guard !host.isEmpty, !token.isEmpty,
-              let url = URL(string: "http://\(host)/permission/decide") else { return }
+              let url = endpoint("permission/decide") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -221,7 +290,7 @@ final class EdgeClient: ObservableObject {
 
     /// Forward an APNs token to the Mac (Tier 2).
     func postPushToken(kind: String, sessionId: String?, pushToken: String) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/pushtoken") else { return }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("pushtoken") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -235,7 +304,7 @@ final class EdgeClient: ObservableObject {
 
     /// Answer a held AskUserQuestion. answers = {questionText: "label" or "a,b"}.
     func answerQuestion(id: String, answers: [String: String]) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/question/decide") else { return }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("question/decide") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -246,7 +315,7 @@ final class EdgeClient: ObservableObject {
     /// Send a message to Claude Code on the Mac; returns a jobId to poll for the
     /// streamed reply (a `claude -p [--resume]` turn).
     func sendChat(cwd: String, sessionId: String?, message: String) async -> String? {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat") else { return nil }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("chat") else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 10)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -262,7 +331,7 @@ final class EdgeClient: ObservableObject {
 
     /// Projects on the Mac you can start a new autonomous task in.
     func fetchProjects() async -> [Project] {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/projects") else { return [] }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("projects") else { return [] }
         var req = URLRequest(url: url, timeoutInterval: 8)
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
         guard let (data, _) = try? await URLSession.shared.data(for: req),
@@ -273,7 +342,7 @@ final class EdgeClient: ObservableObject {
 
     /// PANIC STOP: kill all running turns + Autonomous off + deny held/incoming.
     func panic() {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/panic") else { return }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("panic") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -282,7 +351,7 @@ final class EdgeClient: ObservableObject {
 
     /// Toggle Autonomous (auto-approve) mode on the Mac.
     func setAutoApprove(_ on: Bool) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/automode") else { return }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("automode") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -292,7 +361,7 @@ final class EdgeClient: ObservableObject {
 
     /// Stop a running chat turn.
     func cancelChat(jobId: String) {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/cancel") else { return }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("chat/cancel") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -302,7 +371,7 @@ final class EdgeClient: ObservableObject {
 
     /// Load a session's real conversation history from the Mac transcript.
     func fetchHistory(sessionId: String, cwd: String) async -> [(role: String, text: String)] {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/history") else { return [] }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("chat/history") else { return [] }
         var req = URLRequest(url: url, timeoutInterval: 12)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -318,7 +387,7 @@ final class EdgeClient: ObservableObject {
 
     /// Poll a chat job until it's done/error.
     func pollChat(_ jobId: String) async -> ChatJob? {
-        guard !host.isEmpty, !token.isEmpty, let url = URL(string: "http://\(host)/chat/poll") else { return nil }
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("chat/poll") else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 10)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -329,7 +398,7 @@ final class EdgeClient: ObservableObject {
 
     /// Ask the Mac to resume this chat (opens it in VS Code on the Mac).
     func openChat(_ chat: EdgeSnapshot.Chat) {
-        guard let url = URL(string: "http://\(host)/open") else { return }
+        guard !token.isEmpty, let url = endpoint("open") else { return }
         var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
@@ -339,7 +408,7 @@ final class EdgeClient: ObservableObject {
 
     func poll() async {
         guard !host.isEmpty, !token.isEmpty,
-              let url = URL(string: "http://\(host)/snapshot") else {
+              let url = endpoint("snapshot") else {
             connected = false; lastError = "Set the Mac address + token"; return
         }
         var req = URLRequest(url: url, timeoutInterval: 6)

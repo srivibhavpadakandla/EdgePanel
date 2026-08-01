@@ -24,8 +24,15 @@ public enum RiskEngine {
         // verb that drives risk classification isn't dropped.
         let bare = name.hasPrefix("mcp__") ? name.components(separatedBy: "__").dropFirst(2).joined(separator: "_") : name
 
+        // The payload shape is a stronger signal than the tool's name. Command-capable MCP tools
+        // commonly use names such as `run_command` or `execute`; limiting shell parsing to tools
+        // whose NAME contains "bash"/"shell" lets a destructive command arrive in the `command`
+        // field and fall through as an auto-allowable `.unknown` action.
+        if let suppliedCommand = command ?? event?.command, !suppliedCommand.isEmpty {
+            return assessCommand(suppliedCommand)
+        }
         if name == "bash" || bare.contains("bash") || bare.contains("shell") {
-            return assessCommand(command ?? event?.command ?? "")
+            return assessCommand("")
         }
         // Severity order matters: a DESTRUCTIVE verb wins over a co-occurring PATH or read/write
         // verb — so a tool like `mcp__fs__delete_file` carrying {"path":…} is NOT downgraded to
@@ -457,15 +464,34 @@ public enum RiskEngine {
     // MARK: - File tool parsing
 
     private static func assessFile(tool: String, path: String, cwd: String?) -> RiskAssessment {
-        let p = (path as NSString).expandingTildeInPath
+        // Resolve lexical traversal before ANY containment/sensitive-path decision. A raw textual
+        // prefix check rated `/repo/../.ssh/authorized_keys` as an in-workspace write, allowing it
+        // in Autonomous mode. Resolve existing symlink ancestors as well; the final leaf may not
+        // exist yet, but `resolvingSymlinksInPath` still canonicalizes every existing component.
+        let expanded = (path as NSString).expandingTildeInPath
+        let baseURL: URL
+        if expanded.hasPrefix("/") {
+            baseURL = URL(fileURLWithPath: expanded)
+        } else if let cwd, !cwd.isEmpty {
+            baseURL = URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath, isDirectory: true)
+                .appendingPathComponent(expanded)
+        } else {
+            baseURL = URL(fileURLWithPath: expanded)
+        }
+        let p = baseURL.standardizedFileURL.resolvingSymlinksInPath().path
         let lower = p.lowercased()
-        let inSystem = lower.hasPrefix("/etc") || lower.hasPrefix("/usr") || lower.hasPrefix("/system") || lower.hasPrefix("/library") || lower.hasPrefix("/private/etc")
+        func isAtOrUnder(_ candidate: String, _ root: String) -> Bool {
+            candidate == root || candidate.hasPrefix(root + "/")
+        }
+        let inSystem = ["/etc", "/usr", "/system", "/library", "/private/etc"]
+            .contains { isAtOrUnder(lower, $0) }
         // Boundary-checked (not a bare hasPrefix), matching the underHome convention used below —
         // else a sibling directory sharing the cwd as a text prefix (cwd=/Users/bob/project,
         // path=/Users/bob/project-secrets/x) would wrongly read as "inWorkspace".
         let inWorkspace: Bool = cwd.map { c in
-            let cw = (c as NSString).expandingTildeInPath
-            return p == cw || p.hasPrefix(cw + "/")
+            let cw = URL(fileURLWithPath: (c as NSString).expandingTildeInPath, isDirectory: true)
+                .standardizedFileURL.resolvingSymlinksInPath().path
+            return isAtOrUnder(p, cw)
         } ?? false
         let writing = tool.contains("write") || tool.contains("edit") || tool.contains("create")
             || tool.contains("move") || tool.contains("rename")   // move/rename mutate the filesystem

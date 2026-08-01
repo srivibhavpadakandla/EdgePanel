@@ -67,7 +67,7 @@ swift build -c release --product EdgePanel
 
 It runs as a menu-bar agent (no dock icon). Flick your cursor to the right screen edge to reveal the panel. Right-click the menu-bar icon to quit, or **Pair iPhone…** to connect your phone.
 
-> **Ports.** The hook server runs on `127.0.0.1:8787` and the phone bridge on `:8788` by default — these must match your hook URLs (8787) and the phone's pairing (8788). Don't override `EDGEPANEL_PORT` / `EDGEPANEL_LAN_PORT` unless you also update both, or the question/chat/permission routing silently breaks.
+> **Ports.** Hooks are loopback-only on `127.0.0.1:8787`. The phone bridge uses `8788`, accepting only loopback and Tailscale peers; ordinary Wi-Fi/LAN connections are dropped before HTTP parsing.
 
 ---
 
@@ -128,9 +128,16 @@ xcodegen generate
 open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simulator
 ```
 
-**Pairing.** Mac: menu-bar icon → **Pair iPhone…** shows a QR (host + token). Phone: scan it (or type the address + token). The Mac serves a token-protected bridge on `:8788`; all traffic is direct phone↔Mac — nothing leaves your devices.
+**Pairing.** Install and connect [Tailscale](https://tailscale.com) on both devices. Mac: menu-bar icon → **Pair iPhone…** automatically finds the Mac's stable Tailscale address and shows it in a QR with the token. Phone: scan it. The reusable pairing token is stored in Keychain on both devices and can be rotated from the pairing window.
 
-**Reaching the Mac.** On a home network with no client isolation, the LAN IP just works. But many routers (and phone hotspots) **isolate clients**, so the phone can't see the Mac even on the same Wi-Fi — and the LAN IP never works off-network. The robust fix is [Tailscale](https://tailscale.com): install on both, sign in with the same account, and pair to the Mac's `100.x` tailnet IP. Then it works on any Wi-Fi *and* cellular, end-to-end encrypted. Launch the Mac app with `EDGEPANEL_PAIR_HOST=100.x.x.x:8788` so the QR encodes the tailnet address. (ATS note: the Tailscale `100.64/10` range is *not* "local networking" to iOS, so the Info.plist uses `NSAllowsArbitraryLoads` **alone** — adding `NSAllowsLocalNetworking` would make iOS ignore it and block the connection.)
+The direct `http://100.x.y.z:8788` connection is restricted to Tailscale's address range and travels inside its encrypted WireGuard tunnel. It does not require Tailscale Serve or an environment variable. If your tailnet has Serve enabled and you prefer HTTPS, that still works:
+
+```sh
+tailscale serve --bg 8788
+EDGEPANEL_PAIR_HOST=https://your-mac.your-tailnet.ts.net .build/release/EdgePanel
+```
+
+Set `EDGEPANEL_PAIR_HOST` to the HTTPS URL printed by `tailscale serve`. EdgePanel rejects ordinary LAN/public HTTP addresses; only loopback, the Tailscale IPv4/IPv6 ranges, or HTTPS are accepted.
 
 ### Talk to Claude Code from your phone
 
@@ -147,8 +154,8 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 
 - **Permission approval** — a held `/permission` request is mirrored into the snapshot with its risk, summary, and preview; Allow / Deny / Always from the phone (or right from a notification) returns the decision to Claude Code.
 - **AskUserQuestion** — when Claude asks a multiple-choice question, the options surface on the phone; your answer is fed back so the turn continues.
-- **Autonomous mode** — auto-allow every permission so a session runs hands-off, *except* the irreversible 1% (`rm -rf`, force-push, `curl | sh`, …) which still asks for a tap.
-- **Panic Stop** — kill every running turn, turn Autonomous off, and deny everything currently held.
+- **Autonomous mode** — auto-allow every permission so a session runs hands-off, *except* the irreversible 1% (`rm -rf`, force-push, `curl | sh`, credential/persistence paths, command-bearing MCP tools, …) which still asks for a tap. It always resets to Manual when the Mac app restarts.
+- **Panic Stop** — terminate every remote turn's whole process group (including tool children), turn Autonomous off, and deny everything currently held. Editor-injected turns are interrupted through the editor and remain best-effort.
 
 ### Dynamic Island & notifications
 
@@ -156,7 +163,7 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 
 - **Live Activity / Dynamic Island** (no account needed) — every running prompt appears with the project, a self-ticking timer, token count, and a proof-of-work caption; it flips to a ✓ done state and tears down when the turn finishes. It tracks **all** your work, including the editor session you're using at the Mac.
 - **Finished notifications** are **titled by the chat's name** (Claude Code's `ai-title`) and carry an "outcome" — a git working-tree summary (`2 files +40−5: …`) of what changed.
-- **Free closed-app push via [ntfy](https://ntfy.sh)** — iOS only delivers to a *fully-closed* app via APNs (paid). The free workaround piggybacks on ntfy's own push: the always-running Mac POSTs to a private topic when a prompt finishes or a permission is waiting, and the permission alert carries Allow/Deny/Always buttons that POST the decision back to the Mac. Configure `~/.edgepanel/ntfy.json` (`server`, `topic`, `macHost`, `token`).
+- **Free closed-app push via [ntfy](https://ntfy.sh)** — iOS only delivers to a *fully-closed* app via APNs (paid). The free workaround piggybacks on ntfy's own push: the always-running Mac POSTs to a private topic when a prompt finishes or a permission is waiting, and the permission alert carries scoped Allow/Deny/Always buttons. Configure `~/.edgepanel/ntfy.json` with `macHost` set to the same full HTTPS Tailscale Serve URL; insecure HTTP action URLs are refused.
 - **Tier 2 — APNs** (optional, paid account) — for instant done/permission/Island updates while the app is fully closed. Configure `~/.edgepanel/apns.json` (`teamId`, `keyId`, `keyPath`, `bundleId`) and drop your `.p8` alongside it. Absent that file, the free tier is used.
 
 ---
@@ -173,7 +180,7 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 | `POST /statusline` | context % + session cost |
 | `GET /health` | liveness |
 
-**Phone bridge — `127.0.0.1:8788`** (token-protected; reachable over LAN/Tailscale):
+**Phone bridge — port `8788`** (token-protected; loopback + Tailscale peers only):
 
 | Method · Path | Purpose |
 |---|---|
@@ -190,7 +197,7 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 
 | Path | Role |
 |---|---|
-| `Sources/PerchCore/HTTPServer.swift` | loopback/LAN HTTP/1.1 server (`NWListener`) |
+| `Sources/PerchCore/HTTPServer.swift` | HTTP/1.1 server (`NWListener`) with loopback/tailnet peer filtering |
 | `Sources/PerchCore/HookEvent.swift` · `RiskEngine.swift` | decode hook payloads · classify tool risk (read/write/danger) |
 | `Sources/EdgePanel/EdgePanelWindow.swift` | the docked `NSPanel` + edge-stick hover state machine |
 | `Sources/EdgePanel/UsageData.swift` · `UsageStore.swift` | transcript/plan aggregation, working/mode/effort detection · observable store + polling |
@@ -208,9 +215,10 @@ open EdgePanelMobile.xcodeproj      # run on a device or the iPhone 17 Pro simul
 | Var | Default | Effect |
 |---|---|---|
 | `EDGEPANEL_PORT` | `8787` | hook server port (must match your hook URLs) |
-| `EDGEPANEL_LAN_PORT` | `8788` | phone-bridge port (must match the phone's pairing) |
-| `EDGEPANEL_PAIR_HOST` | LAN IP | host:port the pairing QR encodes (set to your Tailscale IP) |
+| `EDGEPANEL_LAN_PORT` | `8788` | loopback/tailnet phone-bridge port |
+| `EDGEPANEL_PAIR_HOST` | detected Tailscale IP, then localhost | optional full HTTPS override encoded by the pairing QR |
 | `EDGEPANEL_DECISION_TIMEOUT` | `30` | seconds a held permission waits before falling through to the native prompt |
+| `EDGEPANEL_QUESTION_TIMEOUT` | `115` | seconds a held question waits before falling through to Claude's native prompt |
 | `EDGEPANEL_DEBUG` | off | enables test-only `/debug/*` render & decide endpoints (loopback only) |
 
 ## Notes

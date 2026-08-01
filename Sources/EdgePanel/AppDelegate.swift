@@ -3,16 +3,70 @@ import SwiftUI
 import PerchCore
 import Darwin
 import CryptoKit
+import Security
 
 /// Shared auth helpers so NtfyPusher (a separate class) can mint a scoped action token without
 /// needing a reference to AppDelegate or the raw pairing token.
 enum EdgePanelAuth {
+    private static let service = "com.srivibhav.edgepanel"
+    private static let account = "pairing-token"
+
+    private static func keychainToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let value = String(data: data, encoding: .utf8), !value.isEmpty else { return nil }
+        return value
+    }
+
+    @discardableResult
+    private static func storeKeychainToken(_ token: String) -> Bool {
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let attrs: [String: Any] = [kSecValueData as String: Data(token.utf8)]
+        let updated = SecItemUpdate(key as CFDictionary, attrs as CFDictionary)
+        if updated == errSecSuccess { return true }
+        guard updated == errSecItemNotFound else { return false }
+        var add = key
+        add[kSecValueData as String] = Data(token.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
     static func pairingToken() -> String {
         let key = "edgepanel.pairingToken"
-        if let t = UserDefaults.standard.string(forKey: key), !t.isEmpty { return t }
+        if let token = keychainToken() { return token }
+        // One-time migration from pre-Keychain builds. Delete the defaults copy immediately after
+        // a successful move so backups/preferences no longer contain the full-control credential.
+        if let legacy = UserDefaults.standard.string(forKey: key), !legacy.isEmpty,
+           storeKeychainToken(legacy) {
+            UserDefaults.standard.removeObject(forKey: key)
+            return legacy
+        }
         let t = UUID().uuidString
-        UserDefaults.standard.set(t, forKey: key)
+        guard storeKeychainToken(t) else {
+            // Keychain failures are rare; keep a process-lifetime secret rather than falling back
+            // to plaintext preferences. It changes at relaunch, safely invalidating old pairings.
+            return launchFallbackToken
+        }
         return t
+    }
+
+    private static let launchFallbackToken = UUID().uuidString
+
+    static func rotatePairingToken() -> String {
+        let token = UUID().uuidString
+        return storeKeychainToken(token) ? token : pairingToken()
     }
 
     /// A random secret minted ONCE per process launch, folded into every action-token MAC.
@@ -122,7 +176,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !questions.isEmpty,
                       let qData = try? JSONSerialization.data(withJSONObject: questions) else { return .hookAck() }
                 let project = (bodyObj?["cwd"] as? String).map { ($0 as NSString).lastPathComponent }
-                let answers = await state.requestQuestionDecision(questionsData: qData, project: project)
+                // nil means nobody answered before EdgePanel's hold expired. Return an empty hook
+                // acknowledgement so Claude Code follows its native interactive/non-interactive
+                // behavior; never claim `allow` with an invalid empty answers object.
+                guard let answers = await state.requestQuestionDecision(questionsData: qData, project: project) else {
+                    return .hookAck()
+                }
                 let resp: [String: Any] = ["hookSpecificOutput": [
                     "hookEventName": "PreToolUse", "permissionDecision": "allow",
                     "updatedInput": ["questions": questions, "answers": answers]]]
@@ -205,22 +264,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let token = pairingToken()
         let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_LAN_PORT"] ?? "") ?? 8788
         let store = self.store, state = self.state
-        let server = HTTPServer(port: port, loopbackOnly: false) { request in
+        // Admit loopback and Tailscale peers only. HTTP over a Tailscale address is carried inside
+        // WireGuard; ordinary Wi-Fi/LAN peers are dropped by HTTPServer before request parsing.
+        // A Tailscale Serve HTTPS URL remains supported through EDGEPANEL_PAIR_HOST as well.
+        let server = HTTPServer(port: port, loopbackOnly: true, allowTailnet: true) { request in
             let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
             if request.method == "GET", path == "/health" { return .ok("edgepanel-lan ok") }
-            // Auth: X-EdgePanel-Token header, or ?token= query.
+            // Auth is header-only. Query-string bearer tokens leak into proxy/access logs.
             let headerTok = request.headers["x-edgepanel-token"]
-            // Parse the FIRST token= from the query string only (not .last over the
-            // whole path, which let ?token=known&token=evil pick the attacker's value).
-            let queryTok: String? = {
-                guard let q = request.path.split(separator: "?", maxSplits: 1).dropFirst().first else { return nil }
-                for pair in q.split(separator: "&") {
-                    let kv = pair.split(separator: "=", maxSplits: 1)
-                    if kv.first == "token", kv.count == 2 { return String(kv[1]) }
-                }
-                return nil
-            }()
-            if !Self.constantTimeEqual(headerTok ?? queryTok, token) {
+            if !Self.constantTimeEqual(headerTok, token) {
                 // The full pairing token didn't match. The ONE exception: /permission/decide may
                 // instead authenticate with a scoped per-action token (see EdgePanelAuth) — this
                 // is how ntfy action buttons resolve a permission, since ntfy.sh is a public
@@ -378,7 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             try server.start()
-            NSLog("EdgePanel LAN bridge → http://\(Self.lanIP()):\(port)/snapshot  (token: \(Self.redact(token)))")
+            let remote = Self.tailnetIPv4().map { "http://\($0):\(port)" } ?? "Tailscale unavailable"
+            NSLog("EdgePanel secure bridge → http://127.0.0.1:\(port); remote: \(remote) (tailnet only, token: \(Self.redact(token)))")
         } catch {
             NSLog("EdgePanel LAN bridge failed on :\(port): \(error.localizedDescription)")
         }
@@ -400,9 +453,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Redact a secret for logging — show only a short prefix.
     nonisolated private static func redact(_ s: String) -> String { s.isEmpty ? "—" : "\(s.prefix(8))…" }
 
-    /// Best-effort primary LAN IPv4 (en0/en1), for the pairing log.
-    private static func lanIP() -> String {
-        var result = "127.0.0.1"
+    /// Best-effort Tailscale IPv4. Tailnet nodes occupy 100.64.0.0/10; unlike interface names,
+    /// that address contract is stable across App Store, standalone, and CLI Tailscale builds.
+    private static func tailnetIPv4() -> String? {
+        var result: String?
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return result }
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
@@ -410,11 +464,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let flags = Int32(cur.pointee.ifa_flags)
             if let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
                (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING) {
-                let name = String(cString: cur.pointee.ifa_name)
-                if name == "en0" || name == "en1" {
-                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
-                        result = String(cString: host)
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let address = String(cString: host)
+                    let octets = address.split(separator: ".").compactMap { UInt8($0) }
+                    if octets.count == 4, octets[0] == 100, (64...127).contains(octets[1]) {
+                        result = address
+                        break
                     }
                 }
             }
@@ -467,10 +523,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 
     private var pairingWindow: NSWindow?
-    @objc private func showPairing() {
+    private func pairingBaseURL() -> String {
         let port = UInt16(ProcessInfo.processInfo.environment["EDGEPANEL_LAN_PORT"] ?? "") ?? 8788
-        let host = ProcessInfo.processInfo.environment["EDGEPANEL_PAIR_HOST"] ?? "\(Self.lanIP()):\(port)"
-        let view = PairingView(host: host, token: pairingToken())
+        guard let configured = ProcessInfo.processInfo.environment["EDGEPANEL_PAIR_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !configured.isEmpty else {
+            return Self.tailnetIPv4().map { "http://\($0):\(port)" } ?? "http://127.0.0.1:\(port)"
+        }
+        return configured.contains("://") ? configured : "https://\(configured)"
+    }
+
+    @objc private func showPairing() {
+        let view = PairingView(host: pairingBaseURL(), token: pairingToken(), onRotate: { [weak self] in
+            self?.rotatePairingToken()
+        })
         if pairingWindow == nil {
             let win = NSWindow(contentViewController: NSHostingController(rootView: view))
             win.title = "Pair iPhone"
@@ -483,6 +548,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         pairingWindow?.center()
         pairingWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func rotatePairingToken() {
+        let token = EdgePanelAuth.rotatePairingToken()
+        let view = PairingView(host: pairingBaseURL(), token: token, onRotate: { [weak self] in
+            self?.rotatePairingToken()
+        })
+        (pairingWindow?.contentViewController as? NSHostingController<PairingView>)?.rootView = view
     }
 
     // MARK: - Debug toggle (headless verification)
