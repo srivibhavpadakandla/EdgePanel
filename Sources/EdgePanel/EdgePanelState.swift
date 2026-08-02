@@ -120,6 +120,7 @@ final class EdgePanelState: ObservableObject {
     }()
 
     private var idleTimer: Timer?
+    private var renotifyTimer: Timer?   // re-pushes a still-unanswered permission so it isn't missed
 
     /// The footer status verb shown next to the asterisk.
     var statusVerb: String {
@@ -377,6 +378,7 @@ final class EdgePanelState: ObservableObject {
             if pending == nil { pending = request }
             onApprovalChange?(true)           // lock open + auto-reveal
             pushPermissionAlert(request)      // Tier 2: ping the phone (no-op unless APNs configured)
+            startRenotify()                   // re-push every 15s until answered, so it isn't missed
             idleTimer?.invalidate(); idleTimer = nil
             Task { [weak self, decisionTimeout, bid] in
                 try? await Task.sleep(nanoseconds: UInt64(decisionTimeout * 1_000_000_000))
@@ -422,6 +424,7 @@ final class EdgePanelState: ObservableObject {
     private func resolve(_ bid: String, _ verdict: PermissionVerdict) {
         guard let continuation = resolvers.removeValue(forKey: bid) else { return }   // also guards double-resolve
         pendingRules[bid] = nil; pendingById[bid] = nil
+        if pendingById.isEmpty { stopRenotify() }   // nothing left to re-notify about
         continuation.resume(returning: verdict)
         if pending?.id == bid {
             // Surface the next still-outstanding request instead of orphaning it, and only
@@ -851,6 +854,19 @@ final class EdgePanelState: ObservableObject {
     /// Alert the phone that a permission is waiting — so you can Allow/Deny even with
     /// the app fully closed. Two independent paths: APNs (Tier 2, paid) and ntfy
     /// (free, with Allow/Deny action buttons). No-op if neither is configured.
+    /// Automatically re-push a still-unanswered permission every 15s so a missed first push comes
+    /// back (default decisionTimeout is 30s, so this gets ~1 retry; more if the timeout is raised).
+    /// Self-stops once nothing is pending.
+    private func startRenotify() {
+        guard renotifyTimer == nil else { return }
+        renotifyTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.pendingById.isEmpty { self.stopRenotify(); return }
+            _ = self.resendPendingPermission()
+        }
+    }
+    private func stopRenotify() { renotifyTimer?.invalidate(); renotifyTimer = nil }
+
     /// Re-fire the notification for every currently-pending permission — a manual "resend" for when
     /// the first push was missed on the phone. Returns how many were re-sent (0 = nothing pending).
     func resendPendingPermission() -> Int {
