@@ -28,7 +28,12 @@
 	<string>EdgePanel connects to the EdgePanel app on your Mac over your local network to show your live Claude Code usage.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsLocalNetworking</key>
+		<!-- Tailscale IPs (100.64.0.0/10 CGNAT) are NOT covered by NSAllowsLocalNetworking, so that
+		     setting made ATS block cleartext HTTP to the Mac over the tailnet. Allow arbitrary loads
+		     at the OS layer; the app's endpoint() is the real guard — it permits plain HTTP ONLY to
+		     loopback/Tailscale addresses and forces HTTPS for anything else. NOTE: NSAllowsLocalNetworking
+		     must NOT also be present, or iOS ignores NSAllowsArbitraryLoads. -->
+		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
 	<key>NSSupportsLiveActivities</key>
