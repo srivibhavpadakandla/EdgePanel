@@ -10,8 +10,21 @@
 import Foundation
 
 enum Notifier {
+    /// Quiet hours suppress ONLY the non-urgent "done"/usage alerts — permissions and questions
+    /// always fire (they block Claude). Off unless ~/.edgepanel/notify.json sets it, e.g.
+    /// { "quietStartHour": 23, "quietEndHour": 8 } — local hours, overnight wrap supported.
+    static func inQuietHours(now: Date = Date()) -> Bool {
+        guard let data = FileManager.default.contents(atPath: ("~/.edgepanel/notify.json" as NSString).expandingTildeInPath),
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let start = j["quietStartHour"] as? Int, let end = j["quietEndHour"] as? Int,
+              (0...23).contains(start), (0...23).contains(end), start != end else { return false }
+        let h = Calendar.current.component(.hour, from: now)
+        return start < end ? (h >= start && h < end) : (h >= start || h < end)
+    }
+
     /// A "done" / usage / generic alert → every channel.
     static func alert(deviceToken: String?, title: String, body: String) {
+        if inQuietHours() { return }   // non-urgent → suppressed during configured quiet hours
         if APNsPusher.shared.enabled, let dt = deviceToken {
             APNsPusher.shared.pushAlert(deviceToken: dt, title: title, body: body)
         }
