@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import UIKit
 
 /// Live camera QR scanner. Returns the decoded string. (Camera is unavailable in
 /// the Simulator — manual entry remains the fallback in the pairing sheet.)
@@ -23,6 +24,7 @@ struct QRScanner: UIViewControllerRepresentable {
                   let obj = objects.first as? AVMetadataMachineReadableCodeObject,
                   let s = obj.stringValue else { return }
             fired = true
+            UINotificationFeedbackGenerator().notificationOccurred(.success)   // "got it" cue on decode
             onScan(s)
         }
     }
