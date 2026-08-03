@@ -140,6 +140,7 @@ struct UsageTab: View {
                 T.bg.ignoresSafeArea()
                 ScrollView { Dashboard().padding(16).padding(.bottom, 28) }
                     .scrollIndicators(.hidden)
+                    .refreshable { await client.refresh() }   // pull-to-refresh (the gesture users reflexively try)
             }
             .safeAreaInset(edge: .top) { header }
             .toolbar(.hidden, for: .navigationBar)
@@ -216,14 +217,26 @@ struct Dashboard: View {
                 }.appearIn(4)
                 RecentChatsCard(chats: s.chats).appearIn(5)
                 PromptHistoryCard(prompts: s.promptHistory ?? []).appearIn(6)
+            } else if let err = client.lastError {
+                // Distinct DISCONNECTED state — a perpetual spinner implied progress that wasn't
+                // happening. Show the real problem + a way to re-pair.
+                VStack(spacing: 12) {
+                    Image(systemName: "wifi.exclamationmark").font(.system(size: 34)).foregroundColor(T.subtext)
+                    Text("Can't reach your Mac").font(.claude(16, .semibold)).foregroundColor(T.text)
+                    Text(err).font(.claude(12)).foregroundColor(T.subtext).multilineTextAlignment(.center)
+                    Text("Pull down to retry").font(.claude(11)).foregroundColor(T.subtext.opacity(0.7))
+                }.padding(.top, 72).padding(.horizontal, 28)
             } else {
                 VStack(spacing: 10) {
                     ProgressView().tint(T.accent)
-                    Text(client.lastError ?? "Connecting to your Mac…")
+                    Text("Connecting to your Mac…")
                         .font(.claude(13)).foregroundColor(T.subtext).multilineTextAlignment(.center)
                 }.padding(.top, 80)
             }
         }
+        // Physical "you're needed" cue the instant a permission or question arrives.
+        .sensoryFeedback(.warning, trigger: client.snapshot?.pending?.id)
+        .sensoryFeedback(.impact(weight: .medium), trigger: client.snapshot?.question?.id)
     }
 }
 
