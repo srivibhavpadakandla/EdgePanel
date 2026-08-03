@@ -79,6 +79,25 @@ struct RiskEngineBashTests {
         #expect(bash("git reset --hard").level == .danger)
         #expect(bash("git clean -fdx").level == .danger)
     }
+
+    @Test("running a script / interpreter / build task SURFACES (never silently auto-allowed as .read)")
+    func arbitraryCodeSurfaces() {
+        // These used to default to .read, which requestDecision auto-allows with NO prompt.
+        for cmd in ["python build.py", "python3 ./scripts/x.py", "node deploy.js", "ruby task.rb",
+                    "npm run build", "pnpm run test", "yarn run lint", "make", "gradle assemble",
+                    "bun run start", "deno run main.ts"] {
+            #expect(bash(cmd).level != .read, "\(cmd) must not be silently auto-allowed")
+        }
+        #expect(bash("bun -e 'x'").alwaysDangerous)          // inline exec stays red + always-surface
+        #expect(bash("deno eval 'x'").level != .read)
+    }
+
+    @Test("genuinely safe commands stay calm (.read), not over-flagged")
+    func safeStayCalm() {
+        for cmd in ["ls -la", "cat README.md", "grep -r foo .", "git status", "pwd", "echo hi"] {
+            #expect(bash(cmd).level == .read, "\(cmd) should stay calm")
+        }
+    }
 }
 
 @Suite("RiskEngine · sensitive paths")

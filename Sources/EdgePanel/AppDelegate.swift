@@ -276,8 +276,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
             if request.method == "GET", path == "/health" { return .ok("edgepanel-lan ok") }
             // Auth is header-only. Query-string bearer tokens leak into proxy/access logs.
+            // Read the pairing token LIVE per request (not the value captured at startup) so
+            // rotatePairingToken() takes effect immediately — the old (possibly leaked) token stops
+            // working and the new one is honored — without needing an app relaunch.
             let headerTok = request.headers["x-edgepanel-token"]
-            if !Self.constantTimeEqual(headerTok, token) {
+            if !Self.constantTimeEqual(headerTok, EdgePanelAuth.pairingToken()) {
                 // The full pairing token didn't match. The ONE exception: /permission/decide may
                 // instead authenticate with a scoped per-action token (see EdgePanelAuth) — this
                 // is how ntfy action buttons resolve a permission, since ntfy.sh is a public

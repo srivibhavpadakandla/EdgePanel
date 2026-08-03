@@ -309,7 +309,7 @@ public enum RiskEngine {
             return red("runs as root (sudo)", always: true)
         }
         // Inline code execution — can do anything, so always surface.
-        if !leaders.isDisjoint(with: ["python", "python3", "node", "ruby", "perl", "osascript", "php"]),
+        if !leaders.isDisjoint(with: ["python", "python3", "node", "ruby", "perl", "osascript", "php", "bun", "deno"]),
            cmd.range(of: #"\s-(c|e)\b"#, options: .regularExpression) != nil
                || cmd.range(of: #"\s--eval\b"#, options: .regularExpression) != nil
                || (leaders.contains("php") && cmd.range(of: #"\s-r\b"#, options: .regularExpression) != nil) {
@@ -457,6 +457,18 @@ public enum RiskEngine {
         // Mutating git / file moves.
         if ["commit", "merge", "rebase"].contains(gitSub ?? "") || cmd.contains("mv ") || cmd.contains("> ") {
             return amber("modifies files / history")
+        }
+        // Arbitrary-code shapes that fell through every danger/amber rule above must SURFACE, not
+        // hit the .read default (which requestDecision auto-allows with NO prompt in any mode). An
+        // interpreter run with a script file (python x.py, node y.js), bun/deno, and project/build
+        // script runners (npm/pnpm/yarn run, make/gradle/mvn/rake) all execute unaudited code.
+        // (Inline -c/-e/--eval is already caught as red above; this is the script-file / run form.)
+        if !leaders.isDisjoint(with: ["python", "node", "ruby", "perl", "php", "osascript", "bun", "deno"]) {
+            return amber("runs a script")
+        }
+        if cmd.range(of: #"\b(npm|pnpm|yarn)\s+(run|exec)\b"#, options: .regularExpression) != nil
+            || !leaders.isDisjoint(with: ["make", "gradle", "gradlew", "mvn", "rake"]) {
+            return amber("runs a build/script task")
         }
         return RiskAssessment(level: .read, reason: "safe command", alwaysDangerous: false)
     }
