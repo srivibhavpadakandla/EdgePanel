@@ -64,8 +64,20 @@ final class EdgePanelState: ObservableObject {
     /// Autonomous mode is intentionally process-lifetime only. Relaunching restores the safe
     /// default instead of silently resuming broad auto-approval hours or days later.
     @Published var autoApprove = false
-    func setAutoApprove(_ on: Bool) {
+    @Published var autoApproveUntil: Date?          // when Autonomous auto-expires (nil = off)
+    private var autoOffTimer: Timer?
+    func setAutoApprove(_ on: Bool, minutes: Int = 30) {
         autoApprove = on
+        autoOffTimer?.invalidate(); autoOffTimer = nil
+        autoApproveUntil = nil
+        // Time-box it: Autonomous never stays on forever, so a forgotten "turn it off" can't leave
+        // the gate wide open. Re-tapping Auto refreshes the window; minutes<=0 means indefinite.
+        if on, minutes > 0 {
+            autoApproveUntil = Date().addingTimeInterval(Double(minutes) * 60)
+            autoOffTimer = Timer.scheduledTimer(withTimeInterval: Double(minutes) * 60, repeats: false) { [weak self] _ in
+                self?.setAutoApprove(false)
+            }
+        }
         // Drain EVERY held non-dangerous request (not just the surfaced one) so flipping
         // Autonomous on is truly hands-off — otherwise sibling held requests hang until their
         // 30s timeout. The irreversible 1% (alwaysDangerous) stays held for a tap, preserving
