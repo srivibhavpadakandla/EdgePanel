@@ -222,6 +222,8 @@ struct SessionsCard: View {
     var chrome: Bool = true            // false → render without its own card container
     var currentMode: String = "ask"    // shown as a compact badge when idle (no chats running)
     var currentEffort: String = ""
+    var onOpen: (LiveSession) -> Void = { _ in }   // tap a live chat → open/resume it in the editor
+    @State private var hoveredID: String?          // row under the cursor → subtle highlight
 
     private func promptLine(_ s: LiveSession) -> String {
         guard let pt = s.promptText, !pt.isEmpty else { return "working…" }
@@ -254,6 +256,7 @@ struct SessionsCard: View {
                     }
                 } else {
                     ForEach(working.prefix(4)) { s in
+                      Button { onOpen(s) } label: {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 9) {
                                 Circle().fill(theme.green).frame(width: 7, height: 7)
@@ -309,6 +312,13 @@ struct SessionsCard: View {
                             }
                         }
                         .padding(.vertical, 3)
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(hoveredID == s.id ? theme.track.opacity(0.6) : Color.clear))
+                        .contentShape(Rectangle())
+                      }
+                      .buttonStyle(PressableButtonStyle())
+                      .onHover { inside in hoveredID = inside ? s.id : (hoveredID == s.id ? nil : hoveredID) }
                     }
                 }
             }
@@ -385,6 +395,18 @@ struct ModeEffortBadge: View {
                 }
             }
         }
+    }
+}
+
+/// Tactile press feedback for the panel's buttons — a subtle scale + dim on press, so taps feel
+/// alive instead of dead (every button used .plain before, which has no pressed state).
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .contentShape(Rectangle())
     }
 }
 
@@ -700,6 +722,15 @@ struct EdgeUsageView: View {
         let t = Theme.resolve(.dark)
         VStack(spacing: 0) {
             header(t)
+            // Pin the permission gate ABOVE the scroll region so Allow/Deny/Always are always
+            // reachable — a scrolled panel could otherwise push the decision off-screen.
+            if let p = state.pending {
+                PermissionCard(pending: p, theme: t,
+                               onAllow: { state.resolveCurrent(.allow) },
+                               onDeny: { state.resolveCurrent(.deny) },
+                               onAlways: { state.allowAlwaysCurrent() })
+                    .padding(.horizontal, 16).padding(.top, 12)
+            }
             ScrollView(.vertical, showsIndicators: false) {
                 content(t).padding(16)
             }
@@ -771,16 +802,12 @@ struct EdgeUsageView: View {
         }()
 
         return VStack(spacing: 14) {
-            if let p = state.pending {
-                PermissionCard(pending: p, theme: t,
-                               onAllow: { state.resolveCurrent(.allow) },
-                               onDeny: { state.resolveCurrent(.deny) },
-                               onAlways: { state.allowAlwaysCurrent() })
-            }
-            // WORKING NOW, with each chat showing its own compact mode + effort badge (chats can
-            // run in different modes simultaneously), plus the current mode as a badge when idle.
+            // (PermissionCard is pinned above the ScrollView in `body` so Allow/Deny stay reachable.)
+            // WORKING NOW — tap a chat to open/resume it; each shows its own mode + effort badge
+            // (chats can run in different modes simultaneously), plus the current mode when idle.
             SessionsCard(sessions: store.sessions, summaries: store.promptSummaries, theme: t,
-                         currentMode: state.normalizedMode, currentEffort: state.normalizedEffort)
+                         currentMode: state.normalizedMode, currentEffort: state.normalizedEffort,
+                         onOpen: { state.openChat(cwd: $0.cwd, id: $0.id) })
 
             if let plan = store.plan {
                 planCard(t, "Current", plan.fiveHourPct, plan.fiveHourReset, burn: store.burn)
@@ -904,15 +931,35 @@ struct EdgeUsageView: View {
     // MARK: footer
 
     private func footer(_ t: Theme) -> some View {
-        HStack(spacing: 8) {
-            Text("✳").font(.claude(11)).foregroundColor(state.isActive ? t.accent : t.subtext)
+        HStack(spacing: 7) {
             Text(statusText()).font(.claude(11)).foregroundColor(state.isActive ? t.accent : t.subtext)
-            Spacer()
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 4)
+            // Auto-approve (hands-off) — tinted when armed. Was implemented but had no UI.
+            Button { state.setAutoApprove(!state.autoApprove) } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "bolt.fill").font(.system(size: 8, weight: .bold))
+                    Text("Auto").font(.claude(10, .semibold))
+                }
+                .foregroundColor(state.autoApprove ? t.bg : t.subtext)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(state.autoApprove ? t.accent : t.track))
+            }.buttonStyle(PressableButtonStyle()).help("Auto-approve safe actions (irreversible ones still ask)")
+            // Panic — refuse everything for a short window. Was implemented but had no UI.
+            Button { _ = state.panic() } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "hand.raised.fill").font(.system(size: 8, weight: .bold))
+                    Text("Panic").font(.claude(10, .semibold))
+                }
+                .foregroundColor(state.panicArmed ? t.bg : t.red)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(state.panicArmed ? t.red : t.red.opacity(0.16)))
+            }.buttonStyle(PressableButtonStyle()).help("Deny all actions for 10s")
             Button { NSApp.terminate(nil) } label: {
-                Text("Quit").font(.claude(12, .medium))
-            }.buttonStyle(.plain).foregroundColor(t.subtext)
+                Text("Quit").font(.claude(11, .medium))
+            }.buttonStyle(PressableButtonStyle()).foregroundColor(t.subtext)
         }
-        .padding(.horizontal, 16).padding(.vertical, 11)
+        .padding(.horizontal, 16).padding(.vertical, 10)
         .overlay(Rectangle().fill(t.border).frame(height: 1), alignment: .top)
     }
 
