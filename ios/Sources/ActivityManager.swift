@@ -57,11 +57,13 @@ final class ActivityManager {
             guard granted else { return }
             DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
         }
-        // Allow / Deny buttons right on the permission notification.
-        let allow = UNNotificationAction(identifier: "ALLOW", title: "Allow", options: [.authenticationRequired])
-        let deny  = UNNotificationAction(identifier: "DENY",  title: "Deny",  options: [.destructive, .authenticationRequired])
+        // Allow / Always allow / Deny buttons right on the permission notification. "Always"
+        // persists the rule so the same command isn't re-asked — the payload already carries it.
+        let allow  = UNNotificationAction(identifier: "ALLOW",  title: "Allow", options: [.authenticationRequired])
+        let always = UNNotificationAction(identifier: "ALWAYS", title: "Always allow", options: [.authenticationRequired])
+        let deny   = UNNotificationAction(identifier: "DENY",   title: "Deny",  options: [.destructive, .authenticationRequired])
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: "PERMISSION", actions: [allow, deny],
+            UNNotificationCategory(identifier: "PERMISSION", actions: [allow, always, deny],
                                    intentIdentifiers: [], options: [])
         ])
         startTokenObservers()

@@ -89,8 +89,9 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         if let id = response.notification.request.content.userInfo["permId"] as? String {
-            let decision = response.actionIdentifier == "ALLOW" ? "allow"
-                         : response.actionIdentifier == "DENY"  ? "deny"  : ""
+            let decision = response.actionIdentifier == "ALLOW"  ? "allow"
+                         : response.actionIdentifier == "ALWAYS" ? "always"
+                         : response.actionIdentifier == "DENY"   ? "deny"  : ""
             if !decision.isEmpty {
                 Task { @MainActor in EdgeClient.shared.decidePermission(id: id, decision: decision) }
             }
