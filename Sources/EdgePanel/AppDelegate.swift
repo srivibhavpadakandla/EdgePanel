@@ -435,6 +435,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"],
                                     body: Data("{\"autoApprove\":\(on)}".utf8))
             }
+            // Set a chat's reasoning effort from the phone. Body: {cwd?, effort}.
+            // Writes `effortLevel` into that project's .claude/settings.json (global if cwd empty),
+            // preserving other keys. effort must be one of low|medium|high|xhigh|max.
+            if request.method == "POST", path == "/effort" {
+                guard let obj = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+                      let effort = obj["effort"] as? String, EffortWriter.normalize(effort) != nil else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data("bad request".utf8))
+                }
+                let cwd = obj["cwd"] as? String ?? ""
+                guard EffortWriter.write(cwd: cwd, effort: effort) else {
+                    return HTTPResponse(status: 500, headers: [:], body: Data("effort write failed".utf8))
+                }
+                return .ok("effort set")
+            }
             return .notFound()
         }
         do {
