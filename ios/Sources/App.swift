@@ -183,7 +183,8 @@ struct UsageTab: View {
                 }
             }
             Spacer()
-            Circle().fill(client.connected ? T.green : T.red).frame(width: 8, height: 8)
+            // Live connection cue: a pulsing dot when connected (reads as "alive"), static red when not.
+            if client.connected { PulsingDot() } else { Circle().fill(T.red).frame(width: 8, height: 8) }
             Button {
                 Task { await client.refresh() }
             } label: {
