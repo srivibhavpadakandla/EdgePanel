@@ -723,6 +723,7 @@ struct WorkingRow: View {
                     Text("· \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
                 } else {
                     Text(fmtTokens(w.turnTokens)).font(.claude(14, .semibold)).foregroundColor(T.text)
+                        .contentTransition(.numericText()).animation(Motion.number, value: w.turnTokens)
                     Text("tokens this turn · \(prettyModel(w.model))").font(.claude(11)).foregroundColor(T.subtext)
                 }
             }
@@ -878,6 +879,7 @@ struct SpendCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "5H Spend")
                 Text(fmtCost(spend.fiveHourUSD)).font(.claude(24, .bold)).foregroundColor(T.text)
+                    .contentTransition(.numericText()).animation(Motion.number, value: spend.fiveHourUSD)
                 Text("est. API value · this window").font(.claude(11)).foregroundColor(T.subtext)
             }
         }
