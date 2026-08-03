@@ -210,7 +210,7 @@ struct Dashboard: View {
                 if let q = s.question { QuestionCard(q: q).id(q.id) }   // fresh @State per question (no stale selection leak)
                 if let pend = s.pending { PermissionCard(p: pend) }
                 if let p = s.plan { PlanCard(plan: p).appearIn(0) }
-                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk).appearIn(1)
+                ModeCard(mode: s.mode ?? "ask", effort: s.effort ?? "", risk: s.pending?.risk, cwd: s.editorCwd ?? "").appearIn(1)
                 WorkingCard(working: s.working).appearIn(2)
                 CalendarCard(days: s.calendar).appearIn(3)
                 HStack(spacing: 12) {
@@ -291,9 +291,12 @@ struct PromptHistoryCard: View {
 // sets the mode in Claude Code; here we reflect it, the same signal that drives the
 // Mac mascot's animation.
 struct ModeCard: View {
+    @EnvironmentObject var client: EdgeClient
     let mode: String
     let effort: String
     let risk: String?     // pending permission's risk, if one is waiting (overrides the tint)
+    let cwd: String       // editor session's cwd → which chat's effort we set ("" → Mac uses ~/.claude)
+    @State private var pendingEffort: String?   // optimistic: show the tapped choice before the poll lands
 
     private struct Mode { let key, label, icon: String }
     private let modes: [Mode] = [
@@ -353,20 +356,37 @@ struct ModeCard: View {
         }
     }
 
+    // Tap the effort readout to CYCLE low→medium→high→xhigh→max→low (wrap). The tapped choice
+    // is shown optimistically (pendingEffort) so it doesn't wait a full poll; setEffort POSTs it
+    // to the Mac, which pushes it back on the next snapshot. Mode stays read-only above.
     private var effortMeter: some View {
-        let lvl = normEffort(effort)
+        let lvl = pendingEffort ?? normEffort(effort)   // optimistic override wins until the poll catches up
         let idx = efforts.firstIndex(of: lvl)
-        return HStack(spacing: 8) {
-            Text("Effort").font(.claude(12, .medium)).foregroundColor(T.subtext)
-            HStack(spacing: 4) {
-                ForEach(0..<efforts.count, id: \.self) { i in
-                    Capsule().fill(idx != nil && i <= idx! ? tint : T.track).frame(height: 5)
+        return Button {
+            let base = idx ?? (efforts.count - 1)        // unknown → treat as max so the first tap lands on low
+            let next = efforts[(base + 1) % efforts.count]
+            pendingEffort = next
+            client.setEffort(cwd: cwd, effort: next)
+        } label: {
+            HStack(spacing: 8) {
+                Text("Effort").font(.claude(12, .medium)).foregroundColor(T.subtext)
+                HStack(spacing: 4) {
+                    ForEach(0..<efforts.count, id: \.self) { i in
+                        Capsule().fill(idx != nil && i <= idx! ? tint : T.track).frame(height: 5)
+                    }
                 }
+                Text(idx != nil ? effortLabel(lvl) : "—")
+                    .font(.claude(11, .semibold))
+                    .foregroundColor(idx != nil ? tint : T.subtext)
+                    .frame(width: 58, alignment: .trailing)
             }
-            Text(idx != nil ? effortLabel(lvl) : "—")
-                .font(.claude(11, .semibold))
-                .foregroundColor(idx != nil ? tint : T.subtext)
-                .frame(width: 58, alignment: .trailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.selection, trigger: pendingEffort)
+        // Once the Mac's snapshot reflects our choice, drop the optimistic override.
+        .onChange(of: effort) { _, newVal in
+            if pendingEffort != nil, normEffort(newVal) == pendingEffort { pendingEffort = nil }
         }
     }
     private func normEffort(_ e: String) -> String {

@@ -360,6 +360,18 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req); await poll() }
     }
 
+    /// Set this chat's reasoning EFFORT on the Mac (low|medium|high|xhigh|max), then poll
+    /// immediately so the UI reflects it on the next tick. Fire-and-forget, same authed POST
+    /// pattern as decidePermission. An empty cwd lets the Mac fall back to ~/.claude.
+    func setEffort(cwd: String, effort: String) {
+        guard !host.isEmpty, !token.isEmpty, let url = endpoint("effort") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-EdgePanel-Token")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["cwd": cwd, "effort": effort])
+        Task { _ = try? await URLSession.shared.data(for: req); await poll() }
+    }
+
     /// Toggle Autonomous (auto-approve) mode on the Mac.
     func setAutoApprove(_ on: Bool) {
         guard !host.isEmpty, !token.isEmpty, let url = endpoint("automode") else { return }
