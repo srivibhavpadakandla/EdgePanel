@@ -516,6 +516,11 @@ struct QuestionCard: View {
 struct PermissionCard: View {
     @EnvironmentObject var client: EdgeClient
     let p: EdgeSnapshot.Pending
+    @State private var decided: String?   // optimistic: show "Allowing…" instantly, don't wait for the poll
+    private func decide(_ d: String) {
+        decided = d
+        client.decidePermission(id: p.id, decision: d)
+    }
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
@@ -541,30 +546,44 @@ struct PermissionCard: View {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(p.preview.prefix(5).enumerated()), id: \.offset) { _, line in
                             Text(line).font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(T.subtext).lineLimit(1)
+                                .foregroundColor(line.hasPrefix("+") ? T.green : line.hasPrefix("-") ? T.red : T.subtext)
+                                .lineLimit(1)
                         }
                     }
                     .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 8).fill(T.track.opacity(0.5)))
                 }
-                HStack(spacing: 10) {
-                    Button { client.decidePermission(id: p.id, decision: "deny") } label: {
-                        Text("Deny").font(.claude(14, .semibold)).foregroundColor(T.red)
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(T.red.opacity(0.14)))
-                    }.buttonStyle(.plain)
-                    Button { client.decidePermission(id: p.id, decision: "allow") } label: {
-                        Text("Allow").font(.claude(14, .semibold)).foregroundColor(.black)
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(T.green))
+                if let decided {
+                    HStack(spacing: 6) {
+                        Image(systemName: decided == "deny" ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        Text(decided == "deny" ? "Denying…" : decided == "always" ? "Always allowing…" : "Allowing…")
+                            .font(.claude(14, .semibold))
+                    }
+                    .foregroundColor(decided == "deny" ? T.red : T.green)
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                    .transition(.opacity)
+                } else {
+                    HStack(spacing: 10) {
+                        Button { decide("deny") } label: {
+                            Text("Deny").font(.claude(14, .semibold)).foregroundColor(T.red)
+                                .frame(maxWidth: .infinity).padding(.vertical, 10)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(T.red.opacity(0.14)))
+                        }.buttonStyle(.plain)
+                        Button { decide("allow") } label: {
+                            Text("Allow").font(.claude(14, .semibold)).foregroundColor(.black)
+                                .frame(maxWidth: .infinity).padding(.vertical, 10)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(T.green))
+                        }.buttonStyle(.plain)
+                    }
+                    Button { decide("always") } label: {
+                        Text("Always allow this").font(.claude(12, .medium)).foregroundColor(T.accent2)
+                            .frame(maxWidth: .infinity)
                     }.buttonStyle(.plain)
                 }
-                Button { client.decidePermission(id: p.id, decision: "always") } label: {
-                    Text("Always allow this").font(.claude(12, .medium)).foregroundColor(T.accent2)
-                        .frame(maxWidth: .infinity)
-                }.buttonStyle(.plain)
             }
         }
+        .animation(.easeOut(duration: 0.15), value: decided)
+        .sensoryFeedback(decided == "deny" ? .error : .success, trigger: decided)
         .background(RoundedRectangle(cornerRadius: 16).strokeBorder(riskColor.opacity(0.55), lineWidth: 1.2))
     }
     private var riskColor: Color {
