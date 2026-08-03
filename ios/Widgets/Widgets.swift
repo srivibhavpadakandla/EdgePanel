@@ -1,6 +1,7 @@
 import WidgetKit
 import SwiftUI
 import ActivityKit
+import AppIntents
 
 @main
 struct EdgePanelWidgetBundle: WidgetBundle {
@@ -12,6 +13,65 @@ struct EdgePanelWidgetBundle: WidgetBundle {
 
 private let olive = Color(.sRGB, red: 0x93/255, green: 0xA0/255, blue: 0x63/255, opacity: 1)
 private let clay = Color(.sRGB, red: 0xD9/255, green: 0x79/255, blue: 0x5E/255, opacity: 1)
+private let danger = Color(.sRGB, red: 0xD0/255, green: 0x45/255, blue: 0x3E/255, opacity: 1)
+
+/// Accent for a pending permission, by its risk: danger→red, write→clay, read→olive.
+private func permTint(_ risk: String?) -> Color {
+    switch (risk ?? "").lowercased() {
+    case "danger": return danger
+    case "write":  return clay
+    default:       return olive
+    }
+}
+
+/// The three interactive decisions, driven by `PermissionDecisionIntent` so a tap approves the
+/// held permission on the Mac WITHOUT opening the app (works on the Lock Screen + expanded Island).
+private struct PermissionActions: View {
+    let permId: String
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(intent: PermissionDecisionIntent(permId: permId, decision: "deny")) {
+                Text("Deny").font(.system(size: 13, weight: .semibold)).foregroundColor(danger)
+                    .frame(maxWidth: .infinity).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(danger.opacity(0.16)))
+            }.buttonStyle(.plain)
+            Button(intent: PermissionDecisionIntent(permId: permId, decision: "allow")) {
+                Text("Allow").font(.system(size: 13, weight: .bold)).foregroundColor(.black)
+                    .frame(maxWidth: .infinity).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(olive))
+            }.buttonStyle(.plain)
+            Button(intent: PermissionDecisionIntent(permId: permId, decision: "always")) {
+                Text("Always").font(.system(size: 13, weight: .semibold)).foregroundColor(olive)
+                    .frame(maxWidth: .infinity).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 9).strokeBorder(olive.opacity(0.5), lineWidth: 1))
+            }.buttonStyle(.plain)
+        }
+    }
+}
+
+/// Full interactive permission card — header (tool + risk), the ask, and the Allow/Deny/Always
+/// buttons. Shared by the Lock Screen and the Dynamic Island expanded region.
+private struct PermissionView: View {
+    let state: WorkingAttributes.ContentState
+    var body: some View {
+        let tint = permTint(state.permRisk)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill").font(.system(size: 15)).foregroundColor(tint)
+                Text(state.permTool ?? "Permission")
+                    .font(.system(size: 14, weight: .semibold, design: .serif)).foregroundColor(.white).lineLimit(1)
+                Spacer(minLength: 6)
+                Text((state.permRisk ?? "read").uppercased())
+                    .font(.system(size: 9, weight: .bold)).foregroundColor(tint)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(tint.opacity(0.18)))
+            }
+            Text("needs your approval")
+                .font(.system(size: 12, design: .serif)).foregroundColor(.white.opacity(0.8)).lineLimit(1)
+            PermissionActions(permId: state.permId ?? "")
+        }
+    }
+}
 
 // The countup timer self-ticks in the widget without the app being awake, so the
 // activity stays accurate while a prompt runs even fully backgrounded. "Done" is
@@ -29,15 +89,21 @@ struct WorkingLiveActivity: Widget {
             let s = context.state
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(s.done ? "Done" : (s.count > 1 ? "\(s.count) chats" : (s.primary?.project ?? "Working")),
-                          systemImage: s.done ? "checkmark.circle.fill" : "bird.fill")
+                    Label(s.hasPermission ? (s.permTool ?? "Permission")
+                          : (s.done ? "Done" : (s.count > 1 ? "\(s.count) chats" : (s.primary?.project ?? "Working"))),
+                          systemImage: s.hasPermission ? "lock.shield.fill" : (s.done ? "checkmark.circle.fill" : "bird.fill"))
                         .font(.system(size: 13, weight: .semibold, design: .serif))
-                        .foregroundColor(.white).lineLimit(1)
+                        .foregroundColor(s.hasPermission ? permTint(s.permRisk) : .white).lineLimit(1)
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Group {
-                        if s.done {
+                        if s.hasPermission {
+                            Text((s.permRisk ?? "read").uppercased())
+                                .font(.system(size: 10, weight: .bold)).foregroundColor(permTint(s.permRisk))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(permTint(s.permRisk).opacity(0.18)))
+                        } else if s.done {
                             Label("done", systemImage: "checkmark.circle.fill").foregroundColor(olive)
                                 .font(.system(size: 13, weight: .semibold))
                         } else if let p = s.primary {
@@ -51,7 +117,13 @@ struct WorkingLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     Group {
-                        if s.done {
+                        if s.hasPermission {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("needs your approval")
+                                    .font(.system(size: 12, design: .serif)).foregroundColor(.white.opacity(0.8)).lineLimit(1)
+                                PermissionActions(permId: s.permId ?? "")
+                            }
+                        } else if s.done {
                             Text(s.doneDetail ?? "finished")
                                 .font(.system(size: 13, design: .serif)).foregroundColor(.white.opacity(0.9))
                         } else if s.count <= 1, let p = s.primary {
@@ -87,7 +159,10 @@ struct WorkingLiveActivity: Widget {
             } compactLeading: {
                 BirdBadge(state: s)
             } compactTrailing: {
-                if s.done {
+                if s.hasPermission {
+                    Text("Approve").font(.system(size: 12, weight: .bold, design: .serif))
+                        .foregroundColor(permTint(s.permRisk)).lineLimit(1)
+                } else if s.done {
                     HStack(spacing: 3) {
                         Image(systemName: "checkmark.circle.fill").font(.system(size: 13))
                         Text("Done").font(.system(size: 13, weight: .semibold, design: .serif))
@@ -102,7 +177,7 @@ struct WorkingLiveActivity: Widget {
             }
             // Green keyline on completion — animates with the working→done push so the
             // Island visibly flashes "complete" before it's torn down on `end`.
-            .keylineTint(s.done ? olive : clay)
+            .keylineTint(s.hasPermission ? permTint(s.permRisk) : (s.done ? olive : clay))
         }
     }
 }
@@ -114,11 +189,11 @@ private struct BirdBadge: View {
     var minimal: Bool = false   // the minimal slot is a tiny circle → glyph only, no count
     var body: some View {
         HStack(spacing: 2) {
-            Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")
+            Image(systemName: state.hasPermission ? "lock.shield.fill" : (state.done ? "checkmark.circle.fill" : "bird.fill"))
                 .font(.system(size: minimal ? 15 : 16))
-                .foregroundColor(state.done ? olive : clay)
+                .foregroundColor(state.hasPermission ? permTint(state.permRisk) : (state.done ? olive : clay))
                 .contentTransition(.symbolEffect(.replace))   // animated glyph swap on done
-            if !minimal && !state.done && state.count > 1 {
+            if !minimal && !state.done && !state.hasPermission && state.count > 1 {
                 Text(state.count > 9 ? "9+" : "\(state.count)")
                     .font(.system(size: 11, weight: .bold)).foregroundColor(olive)
                     .monospacedDigit()
@@ -160,6 +235,13 @@ private struct SessionRow: View {
 struct LockScreenView: View {
     let state: WorkingAttributes.ContentState
     var body: some View {
+        if state.hasPermission {
+            PermissionView(state: state)
+        } else {
+            workingBody
+        }
+    }
+    private var workingBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: state.done ? "checkmark.circle.fill" : "bird.fill")

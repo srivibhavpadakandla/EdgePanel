@@ -25,6 +25,24 @@ enum UsageShared {
         }
     }
 
+    // MARK: - Connection (Mac host + pairing token) bridge
+    // The interactive Live Activity intent (PermissionDecisionIntent) runs outside the app's
+    // process and cannot read the app's @AppStorage host or the Keychain pairing token. The app
+    // mirrors both into the shared App Group here so the intent can POST /permission/decide.
+    static func writeConn(host: String, token: String) {
+        guard let d = store else { return }
+        d.set(host, forKey: "connHost")
+        d.set(token, forKey: "connToken")
+    }
+    /// Read the Mac host + pairing token from the App Group (used by the Live Activity intent).
+    static func readConn() -> (host: String, token: String)? {
+        guard let d = store else { return nil }
+        let host = (d.string(forKey: "connHost") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = d.string(forKey: "connToken") ?? ""
+        guard !host.isEmpty, !token.isEmpty else { return nil }
+        return (host, token)
+    }
+
     struct Snapshot { let five: Double; let week: Double; let reset: Date?; let updated: Date }
     static func read() -> Snapshot? {
         guard let d = store, let u = d.object(forKey: "updatedAt") as? Double else { return nil }

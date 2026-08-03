@@ -141,8 +141,16 @@ final class ActivityManager {
             UNNotificationRequest(identifier: "q-\(q.id)", content: c, trigger: nil))
     }
 
-    /// Reconcile the aggregate Live Activity with the current working sessions.
-    func sync(working rawWorking: [EdgeSnapshot.Working]) {
+    /// Build the working ContentState, overlaying the currently-pending permission (if any) so
+    /// the widget can render the interactive Allow/Deny/Always buttons.
+    private func workingState(_ lines: [WorkingAttributes.Line], pending: EdgeSnapshot.Pending?) -> WorkingAttributes.ContentState {
+        WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil,
+                                       permId: pending?.id, permTool: pending?.tool, permRisk: pending?.risk)
+    }
+
+    /// Reconcile the aggregate Live Activity with the current working sessions. `pending` overlays
+    /// a held permission onto the Island so it can be approved from the Lock Screen.
+    func sync(working rawWorking: [EdgeSnapshot.Working], pending: EdgeSnapshot.Pending? = nil) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         // The Dynamic Island tracks ALL working sessions, including the editor session you're
         // watching at the Mac (the user wants their work visible on the phone). It still ends:
@@ -181,6 +189,27 @@ final class ActivityManager {
                 activity: w.activity ?? "", freezeAt: freezeAt)
         }
         last = Dictionary(deduped.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        // A held permission with no active turn still deserves the Island — surface/refresh it
+        // (interactive Allow/Deny/Always) instead of running the done/end teardown.
+        if lines.isEmpty, let p = pending {
+            emptyTicks = 0; pendingDoneDetail = nil
+            if let t = endTask { t.cancel(); endTask = nil }
+            let content = ActivityContent(state: workingState([], pending: p), staleDate: nil)
+            if let act = aggregate, act.activityState == .active || act.activityState == .stale {
+                serialUpdate(act, content)
+            } else if let existing = Activity<WorkingAttributes>.activities.first(where: { $0.activityState == .active || $0.activityState == .stale }) {
+                aggregate = existing; observePushToken(existing); serialUpdate(existing, content)
+            } else {
+                let attrs = WorkingAttributes(id: "edgepanel")
+                if let act = try? Activity.request(attributes: attrs, content: content, pushType: .token) {
+                    aggregate = act; observePushToken(act)
+                } else if let act = try? Activity.request(attributes: attrs, content: content) {
+                    aggregate = act
+                }
+            }
+            return
+        }
 
         // Nothing running → flip the activity to a brief "done" state, then end it.
         if lines.isEmpty {
@@ -228,7 +257,7 @@ final class ActivityManager {
         // Requested with a push token: the Mac pushes "end" (and membership updates)
         // the instant a turn finishes, so the Island stops seamlessly even fully
         // closed — no app wake-up needed. The bounded timer still self-ticks live.
-        let state = WorkingAttributes.ContentState(sessions: lines, done: false, doneDetail: nil)
+        let state = workingState(lines, pending: pending)
         let content = ActivityContent(state: state, staleDate: nil)
         // Update reuses an active OR stale activity — update transitions stale→active, so a
         // push-started (stale) Island is driven back to life instead of stranded as a duplicate.

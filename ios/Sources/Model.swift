@@ -221,7 +221,12 @@ final class EdgeClient: ObservableObject {
 
     @AppStorage("edgepanel.host") var host: String = ""   // full HTTPS base URL
     @Published var token: String {
-        didSet { PairingKeychain.write(token) }
+        didSet {
+            PairingKeychain.write(token)
+            // Mirror host+token into the App Group so the interactive Live Activity intent
+            // (which runs outside this process) can POST /permission/decide.
+            UsageShared.writeConn(host: host, token: token)
+        }
     }
 
     init() {
@@ -434,6 +439,9 @@ final class EdgeClient: ObservableObject {
             guard code == 200 else { throw URLError(.badServerResponse) }
             let snap = try JSONDecoder().decode(EdgeSnapshot.self, from: data)
             snapshot = snap; connected = true; lastError = nil; lastUpdated = Date()
+            // Keep the App Group's conn (host+token) fresh so the interactive permission intent
+            // can reach the Mac even after the host was edited (host has no didSet of its own).
+            UsageShared.writeConn(host: host, token: token)
             // Mirror the usage % to the App Group so the Lock Screen widget shows it live.
             if let p = snap.plan {
                 UsageShared.write(fiveHourPct: p.fiveHourPct, weekPct: p.weekPct,
@@ -446,7 +454,7 @@ final class EdgeClient: ObservableObject {
                 ActivityManager.shared.resyncBaseline()
             }
             lastPollOK = Date()
-            ActivityManager.shared.sync(working: snap.working)
+            ActivityManager.shared.sync(working: snap.working, pending: snap.pending)
             // Re-seed the Mac with the current Live Activity token on every poll, so it
             // always has a fresh token to push the "end" — even right after a Mac restart
             // (which used to leave the Island frozen on a stuck timer).

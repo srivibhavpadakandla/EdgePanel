@@ -32,9 +32,19 @@ struct WorkingAttributes: ActivityAttributes {
         var done: Bool              // transient end state (all finished)
         var doneDetail: String?     // e.g. "4m 12s · 32K tokens" or "2 chats finished"
 
+        // Interactive permission overlay — when `permId` is non-nil, ONE pending permission is
+        // awaiting a decision. The widget then renders Allow / Deny / Always buttons (driven by
+        // PermissionDecisionIntent) so it can be approved right from the Lock Screen / Dynamic
+        // Island without opening the app. Cleared (nil) when there is no pending permission.
+        var permId: String? = nil
+        var permTool: String? = nil
+        var permRisk: String? = nil   // "read" | "write" | "danger" → button tint
+
         var count: Int { sessions.count }
         /// The longest-running prompt (earliest start) — the headline timer.
         var primary: Line? { sessions.min(by: { $0.startEpoch < $1.startEpoch }) }
+        /// A permission is awaiting a decision → show the interactive Allow/Deny/Always UI.
+        var hasPermission: Bool { permId != nil }
     }
     var id: String   // constant for the single aggregate activity
 }
