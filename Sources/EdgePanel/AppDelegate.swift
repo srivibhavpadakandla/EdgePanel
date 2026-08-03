@@ -95,6 +95,7 @@ enum EdgePanelAuth {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    private var statusTimer: Timer?   // keeps the menu-bar glance (usage % / pending badge) live
     private var controller: EdgePanelController?
     private var signalSource: DispatchSourceSignal?
 
@@ -498,6 +499,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.action = #selector(statusClicked)
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
+        // Live glance: the menu bar is always visible, so surface the headline data (usage % + a
+        // "you're needed" badge when a permission is pending) without needing to reveal the panel.
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshStatusItem() }
+        refreshStatusItem()
+    }
+
+    private func refreshStatusItem() {
+        guard let button = statusItem?.button else { return }
+        func sym(_ name: String, _ desc: String) -> NSImage? {
+            let img = NSImage(systemSymbolName: name, accessibilityDescription: desc); img?.isTemplate = true; return img
+        }
+        if state.pending != nil {
+            button.image = sym("bell.badge.fill", "Permission waiting")
+            button.title = " Approve"
+        } else if let pct = store.displayFiveHourPct {
+            button.image = sym("gauge.with.dots.needle.bottom.50percent", "Claude usage")
+            button.title = " \(Int(pct.rounded()))%"
+        } else {
+            button.image = sym("sidebar.right", "EdgePanel")
+            button.title = ""
+        }
     }
 
     @objc private func statusClicked() {
