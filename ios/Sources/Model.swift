@@ -244,8 +244,14 @@ final class EdgeClient: ObservableObject {
         let loopback = base.host == "127.0.0.1" || base.host == "localhost" || base.host == "::1"
         let tailnet: Bool = {
             guard let host = base.host?.lowercased() else { return false }
-            let octets = host.split(separator: ".").compactMap { UInt8($0) }
-            if octets.count == 4, octets[0] == 100, (64...127).contains(octets[1]) { return true }
+            // Require an EXACT dotted-quad: 4 labels, ALL numeric octets. compactMap alone silently
+            // dropped non-numeric labels, so a hostname like "100.64.0.1.attacker.example" mis-parsed
+            // to a 4-octet "tailnet" IP and would have permitted cleartext HTTP to an attacker host.
+            let parts = host.split(separator: ".")
+            if parts.count == 4 {
+                let octets = parts.compactMap { UInt8($0) }
+                if octets.count == 4, octets[0] == 100, (64...127).contains(octets[1]) { return true }
+            }
             return host.hasPrefix("fd7a:115c:a1e0:")
         }()
         guard scheme == "https" || (scheme == "http" && (loopback || tailnet)) else { return nil }
@@ -406,7 +412,14 @@ final class EdgeClient: ObservableObject {
         Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
+    private var polling = false
     func poll() async {
+        // Single-flight: the 1.5s timer fires unconditionally, but a poll can outlast a tick on a
+        // slow link. Without this, two+ polls overlap and the LAST to resume wins — which can be the
+        // OLDER response, flickering stale data + feeding a spurious Island "done". Drop re-entrant polls.
+        if polling { return }
+        polling = true
+        defer { polling = false }
         guard !host.isEmpty, !token.isEmpty,
               let url = endpoint("snapshot") else {
             connected = false; lastError = "Set the Mac address + token"; return
