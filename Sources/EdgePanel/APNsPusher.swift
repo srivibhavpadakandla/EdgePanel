@@ -86,9 +86,15 @@ final class APNsPusher: @unchecked Sendable {
         if let alert { aps["alert"] = alert }
         // Apple throttles frequent priority-10 content updates — routine "update" pushes
         // go at priority 5; "end" (and the one-off alert it carries) stay at 10.
+        // The terminal "end" is the ONE push whose loss is unrecoverable: drop it and the Island
+        // keeps counting forever with no later push to correct it. Give it an apns-expiration so
+        // APNs STORES and re-delivers it (up to now+1h) if the phone is briefly asleep/off-network,
+        // instead of deliver-once-or-discard. `update`s stay nil — a dropped mid-turn update is
+        // harmless (the next one supersedes it) and stale progress shouldn't be retried later.
         send(token: token, payload: ["aps": aps],
              topic: "\(config.bundleId).push-type.liveactivity", pushType: "liveactivity",
-             priority: priority ?? (event == "update" ? 5 : 10))
+             priority: priority ?? (event == "update" ? 5 : 10),
+             expiresInSeconds: event == "end" ? 3600 : nil)
     }
 
     /// Push-to-start (iOS 17.2+): create the Live Activity even when the app isn't

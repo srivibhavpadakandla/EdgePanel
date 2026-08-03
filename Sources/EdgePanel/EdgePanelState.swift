@@ -616,6 +616,11 @@ final class EdgePanelState: ObservableObject {
         if let m = d.dictionary(forKey: "edgepanel.activityTokens") as? [String: String] { activityPushTokens = m }
         pushToStartToken = d.string(forKey: "edgepanel.startToken")
         devicePushToken = d.string(forKey: "edgepanel.deviceToken")
+        // Restore the push-to-start generation (0 if never saved — same as the initial value). A
+        // Mac restart otherwise reset it to 0, so the still-live Island's re-sent token (stamped
+        // with its original gen) would mismatch the reset counter and setPushToken's deterministic
+        // branch would misclassify it as a stale straggler → spurious "Done"/end on the phone.
+        pushToStartGeneration = d.integer(forKey: "edgepanel.pushToStartGen")
         // Persisted so a Mac restart doesn't reset "when the phone was last active" to distantPast,
         // which would make the FIRST post-restart scan drop the restored (still-live) Island token.
         let at = d.double(forKey: "edgepanel.activityTokenAt")
@@ -644,6 +649,10 @@ final class EdgePanelState: ObservableObject {
         d.set(pushToStartToken, forKey: "edgepanel.startToken")
         d.set(devicePushToken, forKey: "edgepanel.deviceToken")
         d.set(lastActivityTokenAt.timeIntervalSince1970, forKey: "edgepanel.activityTokenAt")
+        // Persist the push-to-start generation too (see loadPushTokens) so it survives a restart
+        // and stays monotonic — otherwise it resets to 0 and setPushToken misreads the live
+        // Island's re-sent (still-valid) token as a stale straggler, firing a spurious done+end.
+        d.set(pushToStartGeneration, forKey: "edgepanel.pushToStartGen")
     }
 
     func setPushToken(kind: String, sessionId: String?, token: String, gen: Int? = nil) {
@@ -733,11 +742,14 @@ final class EdgePanelState: ObservableObject {
     func pushAggregate(working rawWorking: [LiveSession]) {
         endsThisScan = 0   // this scan's ends are already baked into lastFinishedDetail; clear for the next scan
         guard APNsPusher.shared.enabled else { return }
-        // Drive the Island from ALL working sessions, including the editor session you're
-        // watching at the Mac — the user wants to see their work on the phone. It still ends
-        // correctly: a session leaves `working` the instant its turn completes (turnComplete),
-        // so the Island flips to done + tears down via the empty-tick debounce below.
-        let working = rawWorking
+        // Drive the Island from the working sessions EXCEPT the editor session you're actively
+        // watching at the Mac — that one is intentionally kept OFF the phone's Dynamic Island
+        // (you're already looking at it in your editor; mirroring it there only clutters the
+        // Island). Only this Island-feeding set is filtered — the sidebar/menu-bar display still
+        // shows every working session, editor included. All other sessions still end correctly: a
+        // session leaves `working` the instant its turn completes (turnComplete), so the Island
+        // flips to done + tears down via the empty-tick debounce below.
+        let working = rawWorking.filter { !$0.isEditor }
         let ids = Set(working.map { $0.id })
         let membershipChanged = ids != lastPushedWorkingIds
 
@@ -841,7 +853,15 @@ final class EdgePanelState: ObservableObject {
             // the isCancelled re-check means a turn that cancelled+replaced us keeps its handle.
             defer { if !Task.isCancelled { self.pendingEndTask = nil } }
             guard self.lastPushedWorkingIds.isEmpty,            // work is STILL idle…
-                  self.activityPushTokens["edgepanel"] == token // …and the same activity
+                  // …and either this is the live activity we adopted, OR nothing is currently
+                  // adopted. The second case is the stranded/reconciliation path: setPushToken
+                  // deliberately never wrote this token into activityPushTokens (it belongs to an
+                  // older/late push-to-start), so `== token` alone would be false and the terminal
+                  // `end` would never fire — leaving the Island frozen on "✓ Done" forever. A `nil`
+                  // slot means no newer Island has taken over (a new turn would make `working`
+                  // non-empty and fail the idle guard above), so ending this stranded token is safe.
+                  self.activityPushTokens["edgepanel"] == token
+                    || self.activityPushTokens["edgepanel"] == nil
             else { return }
             NSLog("EdgePanel ISLAND END: end event sent → Island dismissed")
             APNsPusher.shared.pushActivity(token: token, event: "end", contentState: doneState)

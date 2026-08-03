@@ -48,3 +48,38 @@ struct WorkingAttributes: ActivityAttributes {
     }
     var id: String   // constant for the single aggregate activity
 }
+
+// MARK: - Lenient decoding
+// ActivityKit decodes ContentState (and its nested Lines) straight from the APNs push payload.
+// Swift's synthesized Decodable IGNORES property defaults and throws `keyNotFound` on ANY missing
+// non-optional key — so if the Mac's payload omits a newer field (agents / queued / activity /
+// freezeAt on a Line, or done / sessions on ContentState) the WHOLE update is dropped and the Island
+// freezes. These decoders fall back to each field's default instead. Defined in extensions so the
+// synthesized memberwise initializers (used to BUILD state in the app) are preserved.
+
+extension WorkingAttributes.Line {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)                                  // session id — always sent
+        project = (try? c.decode(String.self, forKey: .project)) ?? ""
+        prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
+        startEpoch = (try? c.decode(Double.self, forKey: .startEpoch)) ?? 0
+        tokens = (try? c.decode(Int.self, forKey: .tokens)) ?? 0
+        agents = (try? c.decode(Int.self, forKey: .agents)) ?? 0
+        queued = (try? c.decode(Int.self, forKey: .queued)) ?? 0
+        activity = (try? c.decode(String.self, forKey: .activity)) ?? ""
+        freezeAt = (try? c.decode(Double.self, forKey: .freezeAt)) ?? 0               // 0 → freezeEnd falls back to startEpoch+1
+    }
+}
+
+extension WorkingAttributes.ContentState {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = (try? c.decode([WorkingAttributes.Line].self, forKey: .sessions)) ?? []
+        done = (try? c.decode(Bool.self, forKey: .done)) ?? false
+        doneDetail = try? c.decode(String.self, forKey: .doneDetail)
+        permId = try? c.decode(String.self, forKey: .permId)
+        permTool = try? c.decode(String.self, forKey: .permTool)
+        permRisk = try? c.decode(String.self, forKey: .permRisk)
+    }
+}

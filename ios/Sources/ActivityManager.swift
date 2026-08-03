@@ -152,10 +152,11 @@ final class ActivityManager {
     /// a held permission onto the Island so it can be approved from the Lock Screen.
     func sync(working rawWorking: [EdgeSnapshot.Working], pending: EdgeSnapshot.Pending? = nil) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        // The Dynamic Island tracks ALL working sessions, including the editor session you're
-        // watching at the Mac (the user wants their work visible on the phone). It still ends:
+        // The Dynamic Island tracks running sessions EXCEPT the editor session you're actively
+        // watching at the Mac — that one is your foreground work at the desk, not something the
+        // phone should mirror onto the Island. Every other working session still ends normally:
         // a session leaves `working` the moment its turn completes, flipping the Island to done.
-        let working = rawWorking
+        let working = rawWorking.filter { !$0.isEditor }
         // Adopt an activity the Mac push-started while we were closed, so we drive the
         // same one (update/end) instead of creating a duplicate.
         if aggregate == nil,
@@ -233,7 +234,13 @@ final class ActivityManager {
             // Keep `aggregate` set until the end actually completes — nil-ing it here let a
             // new turn within the hold window spawn a DUPLICATE activity.
             endTask = Task {
-                await act.update(ActivityContent(state: done, staleDate: nil))
+                // Route the "done" flip through the serialUpdate chain too — a raw
+                // `await act.update(...)` here has no ordering guarantee against an in-flight
+                // working update, so a slower earlier update could land AFTER "done" and revive a
+                // dead session on the Island. Chain it, then await the chain so the hold/end below
+                // only run once "done" has actually been applied.
+                serialUpdate(act, ActivityContent(state: done, staleDate: nil))
+                await updateTask?.value
                 try? await Task.sleep(nanoseconds: 6_500_000_000)   // hold "✓ Done" visibly
                 if Task.isCancelled { return }                      // a new turn reclaimed this activity
                 await act.end(ActivityContent(state: done, staleDate: nil),
