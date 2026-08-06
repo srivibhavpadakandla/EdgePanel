@@ -44,6 +44,15 @@ enum EdgePanelAuth {
     }
 
     static func pairingToken() -> String {
+        // Local override: a token file at ~/.edgepanel/pairing-token (chmod 600, outside any repo)
+        // takes precedence, so a pinned/hardcoded client stays paired across relaunches regardless of
+        // Keychain state (the in-memory launchFallbackToken would otherwise rotate the secret on every
+        // restart). Falls through to the Keychain path below when the file is absent or empty.
+        let overridePath = (NSHomeDirectory() as NSString).appendingPathComponent(".edgepanel/pairing-token")
+        if let raw = try? String(contentsOfFile: overridePath, encoding: .utf8) {
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { return t }
+        }
         let key = "edgepanel.pairingToken"
         if let token = keychainToken() { return token }
         // One-time migration from pre-Keychain builds. Delete the defaults copy immediately after
